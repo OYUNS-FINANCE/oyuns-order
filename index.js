@@ -100,11 +100,14 @@ async function getAllRows() {
   return rows;
 }
 
-// Мөр нэмэх (default статус: Хүлээгдэж буй), ЯГ БОДИТ rowIndex-ийг буцаана
+// Мөр нэмэх (default статус: Хүлээгдэж буй), мөрийн дугаар буцаана
 async function appendTransactionRow(date, number, description, amount, status = 'Хүлээгдэж буй') {
-  const timestamp = new Date().toISOString();
+  // Одоогийн мөрүүдийн тоог авах
+  const rows = await getAllRows();
+  const rowIndex = rows.length + 1; // 1-based (шинэ мөрний индекс)
 
-  const res = await sheets.spreadsheets.values.append({
+  const timestamp = new Date().toISOString();
+  await sheets.spreadsheets.values.append({
     spreadsheetId: SPREADSHEET_ID,
     range: `${SHEET_NAME}!A:G`,
     valueInputOption: 'USER_ENTERED',
@@ -112,6 +115,10 @@ async function appendTransactionRow(date, number, description, amount, status = 
       values: [[number, date, description, amount, '', timestamp, status]],
     },
   });
+
+  // Бид өөрсдөө шинэ мөрийн индексийг тооцож байгаа
+  return rowIndex;
+}
 
   // Google Sheets API буцааж өгдөг range-ээс мөрийн дугаар авах (ж: 'Transactions!A15:G15')
   let rowIndex = null;
