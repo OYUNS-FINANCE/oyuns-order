@@ -1,12 +1,9 @@
 const { Telegraf } = require('telegraf');
 const { google } = require('googleapis');
 const path = require('path');
-const http = require('http'); // Render / uptime-д зориулсан жижиг HTTP server
+const http = require('http');
 
 // === ЗӨВШӨӨРӨГДСӨН ЧАТУУД (WHITELIST) ===
-// Анужин хувийн чат: 1920453419
-// Нэг найзын чат:   1447446407
-// Групп чат:        -1003019837728
 const ALLOWED_CHAT_IDS = [
   '1920453419',
   '1447446407',
@@ -17,7 +14,6 @@ const ALLOWED_CHAT_IDS = [
 const BOT_TOKEN = '8108084322:AAEfmQq8uxTlE0L9t3SOQOlIIzQmZ8JwAdI';
 const SPREADSHEET_ID = '1qbxJsI4Ns3a8lluxlRZl5r5AKHA3hp9yS7YZLwY469A';
 const SHEET_NAME = 'Transactions';
-// A:№, B:Огноо, C:Тайлбар, D:Дүн, E:Өртөг ханш, F:Timestamp, G:Статус
 
 // === GOOGLE SHEETS AUTH ===
 const credentialsPath = path.resolve('./service-account.json');
@@ -41,19 +37,99 @@ bot.catch((err, ctx) => {
   console.error('Telegraf error:', err);
 });
 
-// Чат бүрийн төлөв
-const state = {
-  currentDate: {} // chatId -> date string (2025.12.05)
-};
+// === САЙЖРУУЛСАН STATE MANAGEMENT ===
+// Чат бүрд хадгалах мэдээлэл
+class ChatState {
+  constructor() {
+    this.states = new Map(); // chatId -> { currentDate, processingLock }
+  }
 
-// === WHITELIST MIDDLEWARE (НИЙТД НЭГ УДАА) ===
+  getState(chatId) {
+    if (!this.states.has(chatId)) {
+      this.states.set(chatId, {
+        currentDate: null,
+        processingLock: false
+      });
+    }
+    return this.states.get(chatId);
+  }
+
+  setDate(chatId, date) {
+    const state = this.getState(chatId);
+    state.currentDate = date;
+  }
+
+  getDate(chatId) {
+    return this.getState(chatId).currentDate;
+  }
+
+  // Processing lock - давхар мессеж боловсруулахаас сэргийлэх
+  async withLock(chatId, fn) {
+    const state = this.getState(chatId);
+    
+    // Хэрэв аль хэдийн боловсруулж байгаа бол хүлээнэ
+    while (state.processingLock) {
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    
+    state.processingLock = true;
+    try {
+      return await fn();
+    } finally {
+      state.processingLock = false;
+    }
+  }
+}
+
+const chatState = new ChatState();
+
+// === SHEETS LOCK МЕХАНИЗМ ===
+// Нэгэн зэрэг олон бичилт хийхээс сэргийлэх
+class SheetsLock {
+  constructor() {
+    this.locked = false;
+    this.queue = [];
+  }
+
+  async acquire() {
+    return new Promise((resolve) => {
+      if (!this.locked) {
+        this.locked = true;
+        resolve();
+      } else {
+        this.queue.push(resolve);
+      }
+    });
+  }
+
+  release() {
+    if (this.queue.length > 0) {
+      const resolve = this.queue.shift();
+      resolve();
+    } else {
+      this.locked = false;
+    }
+  }
+
+  async withLock(fn) {
+    await this.acquire();
+    try {
+      return await fn();
+    } finally {
+      this.release();
+    }
+  }
+}
+
+const sheetsLock = new SheetsLock();
+
+// === WHITELIST MIDDLEWARE ===
 bot.use(async (ctx, next) => {
   const chatId = ctx.chat && ctx.chat.id ? String(ctx.chat.id) : null;
   if (!chatId) return;
 
   if (!ALLOWED_CHAT_IDS.includes(chatId)) {
-    // зөвшөөрөгдөөгүй чат → дуугүй ignore
-    return;
+    return; // зөвшөөрөгдөөгүй чат → дуугүй ignore
   }
 
   return next();
@@ -61,17 +137,17 @@ bot.use(async (ctx, next) => {
 
 // === ТУСЛАХ ФУНКЦУУД ===
 
-// № авах — эхний хоосон биш мөрөөс (жишээ: "1." эсвэл "1)")
+// № авах
 function extractNumber(text) {
   const lines = text.split('\n').map(l => l.trim());
   const nonEmpty = lines.filter(l => l !== '');
   if (nonEmpty.length === 0) return '';
-  const first = nonEmpty[0]; // ж: "3." эсвэл "3)"
+  const first = nonEmpty[0];
   const m = first.match(/^(\d+)[\.\)]?$/);
   return m && m[1] ? m[1] : '';
 }
 
-// Тайлбар: зөвхөн "Назначение: ..."-ийн хэсэг, "Сумма:"-аас өмнө хүртэл
+// Тайлбар
 function extractDescription(text) {
   const m = text.match(/Назначение:\s*([\s\S]*?)Сумма:/i);
   if (m && m[1]) {
@@ -80,97 +156,144 @@ function extractDescription(text) {
   return text;
 }
 
-// Зарлагын дүн: "Сумма: 3,315,696.00 руб" → 3315696.00 (тоо хэлбэрээр)
+// Зарлагын дүн
 function extractAmountForExpense(text) {
   const m = text.match(/Сумма:\s*([\d\s\.,]+)/i);
   if (!m) return '';
   let s = m[1].trim();
-  s = s.replace(/\s+/g, ''); // бүх зай
-  s = s.replace(/,/g, '');   // бүх комма-г авна → 3315696.00
+  s = s.replace(/\s+/g, '');
+  s = s.replace(/,/g, '');
   const num = parseFloat(s);
   return isNaN(num) ? '' : num;
 }
 
-// Бүх мөрийг авах
-async function getAllRows() {
+// Бүх мөрийг авах - CACHE-ТЭЙГЭЭР
+let rowsCache = null;
+let cacheTime = 0;
+const CACHE_DURATION = 2000; // 2 секунд
+
+async function getAllRows(useCache = true) {
+  const now = Date.now();
+  
+  if (useCache && rowsCache && (now - cacheTime) < CACHE_DURATION) {
+    return rowsCache;
+  }
+
   const res = await sheets.spreadsheets.values.get({
     spreadsheetId: SPREADSHEET_ID,
     range: `${SHEET_NAME}!A:G`
   });
-  const rows = res.data.values || [];
-  return rows;
+  
+  rowsCache = res.data.values || [];
+  cacheTime = now;
+  
+  return rowsCache;
 }
 
-// Мөр нэмэх (default статус: Хүлээгдэж буй), мөрийн дугаар буцаана
+// Cache-ийг устгах
+function invalidateCache() {
+  rowsCache = null;
+  cacheTime = 0;
+}
+
+// Мөр нэмэх - LOCK-ТЭЙГЭЭР
 async function appendTransactionRow(date, number, description, amount, status = 'Хүлээгдэж буй') {
-  const timestamp = new Date().toISOString();
+  return await sheetsLock.withLock(async () => {
+    const timestamp = new Date().toISOString();
 
-  const res = await sheets.spreadsheets.values.append({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME}!A:G`,
-    valueInputOption: 'USER_ENTERED',
-    requestBody: {
-      values: [[number, date, description, amount, '', timestamp, status]]
-    }
-  });
-
-  // Google Sheets API буцааж өгдөг range-ээс мөрийн дугаар авах (ж: 'Transactions!A15:G15')
-  let rowIndex = null;
-  const updates = res.data && res.data.updates;
-  if (updates && updates.updatedRange) {
-    const m = updates.updatedRange.match(/![A-Z]+(\d+):/);
-    if (m && m[1]) {
-      rowIndex = parseInt(m[1], 10);
-    }
-  }
-
-  return rowIndex;
-}
-
-// Огноо таарч байгаа мөрүүдийн E баганад ханш бичих (хоосон байвал)
-async function updateRateForDate(date, rate) {
-  const rows = await getAllRows();
-  if (rows.length < 2) return; // зөвхөн header байвал
-
-  const updates = [];
-  for (let i = 1; i < rows.length; i++) {
-    const row = rows[i];
-    const rowDate = row[1];     // B багана (Огноо)
-    const currentRate = row[4]; // E багана (Өртөг ханш)
-    if (rowDate === date && (!currentRate || currentRate === '')) {
-      const rowIndex = i + 1; // 1-based
-      updates.push({
-        range: `${SHEET_NAME}!E${rowIndex}`,
-        values: [[rate]]
-      });
-    }
-  }
-
-  if (updates.length === 0) return;
-
-  await sheets.spreadsheets.values.batchUpdate({
-    spreadsheetId: SPREADSHEET_ID,
-    requestBody: {
+    const res = await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!A:G`,
       valueInputOption: 'USER_ENTERED',
-      data: updates
+      requestBody: {
+        values: [[number, date, description, amount, '', timestamp, status]]
+      }
+    });
+
+    invalidateCache();
+
+    let rowIndex = null;
+    const updates = res.data && res.data.updates;
+    if (updates && updates.updatedRange) {
+      const m = updates.updatedRange.match(/![A-Z]+(\d+):/);
+      if (m && m[1]) {
+        rowIndex = parseInt(m[1], 10);
+      }
     }
+
+    // Fallback: хэрвээ updatedRange байхгүй бол A баганын мөрийн тоогоор rowIndex тодорхойлно
+    if (!rowIndex) {
+      try {
+        const rowsRes = await sheets.spreadsheets.values.get({
+          spreadsheetId: SPREADSHEET_ID,
+          range: `${SHEET_NAME}!A:A`
+        });
+        const rows = rowsRes.data.values || [];
+        rowIndex = rows.length; // header + бүх мөр
+        console.log(`⚠️ Fallback: rowIndex = ${rowIndex}`);
+      } catch (err) {
+        console.error('Error in fallback rowIndex calculation:', err);
+      }
+    }
+
+    return rowIndex;
   });
 }
 
-// G баганад статус бичих (Амжилттай / Хүлээгдэж буй / Цуцласан)
+// Огноо таарч байгаа мөрүүдийн E баганад ханш бичих
+async function updateRateForDate(date, rate) {
+  return await sheetsLock.withLock(async () => {
+    const rows = await getAllRows(false); // fresh data
+    if (rows.length < 2) return;
+
+    const updates = [];
+    for (let i = 1; i < rows.length; i++) {
+      const row = rows[i];
+      const rowDate = row[1];
+      const currentRate = row[4];
+      if (rowDate === date && (!currentRate || currentRate === '')) {
+        const rowIndex = i + 1;
+        updates.push({
+          range: `${SHEET_NAME}!E${rowIndex}`,
+          values: [[rate]]
+        });
+      }
+    }
+
+    if (updates.length === 0) return 0;
+
+    await sheets.spreadsheets.values.batchUpdate({
+      spreadsheetId: SPREADSHEET_ID,
+      requestBody: {
+        valueInputOption: 'USER_ENTERED',
+        data: updates
+      }
+    });
+
+    invalidateCache();
+    return updates.length;
+  });
+}
+
+// Статус бичих
 async function updateStatus(rowIndex, statusText) {
   if (!rowIndex) return;
-  await sheets.spreadsheets.values.update({
-    spreadsheetId: SPREADSHEET_ID,
-    range: `${SHEET_NAME}!G${rowIndex}`,
-    valueInputOption: 'USER_ENTERED',
-    requestBody: {
-      values: [[statusText]]
-    }
+  
+  return await sheetsLock.withLock(async () => {
+    await sheets.spreadsheets.values.update({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SHEET_NAME}!G${rowIndex}`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[statusText]]
+      }
+    });
+    
+    invalidateCache();
   });
 }
 
-// === КОМАНДУУД: /start, /loading, /successful, /canceled, /general ===
+// === КОМАНДУУД ===
 
 // /start команд
 bot.start((ctx) => {
@@ -187,7 +310,7 @@ bot.start((ctx) => {
   ctx.reply(text, { parse_mode: 'HTML' });
 });
 
-// /loading — Хүлээгдэж буй гүйлгээнүүд (БҮХ өдөр)
+// /loading
 bot.command('loading', async (ctx) => {
   try {
     const rows = await getAllRows();
@@ -222,16 +345,25 @@ bot.command('loading', async (ctx) => {
   }
 });
 
-// /successful — тухайн огнооны амжилттай гүйлгээнүүд
+// /successful [огноо]
 bot.command('successful', async (ctx) => {
   try {
     const chatId = String(ctx.chat.id);
-    const currentDate = state.currentDate[chatId];
+    
+    // Командын дараах текст авах
+    const args = ctx.message.text.split(/\s+/).slice(1);
+    let targetDate;
+    
+    if (args.length > 0) {
+      // Огноо командын дараа байвал түүнийг ашиглах
+      targetDate = args[0].replace(/-/g, '.');
+    } else {
+      // Огноо байхгүй бол сүүлийн тохируулсан огноо ашиглах
+      targetDate = chatState.getDate(chatId);
+    }
 
-    if (!currentDate) {
-      await ctx.reply(
-        'Эхлээд ямар огнооны гүйлгээг харахаа оруулна уу. Жишээ: 2025.12.05 FRIDAY'
-      );
+    if (!targetDate) {
+      await ctx.reply('Огноо оруулна уу. Жишээ: /successful 2025.12.05');
       return;
     }
 
@@ -244,15 +376,15 @@ bot.command('successful', async (ctx) => {
     const ok = rows.slice(1).filter((r) => {
       const date = r[1] || '';
       const status = r[6] || '';
-      return date === currentDate && status === 'Амжилттай';
+      return date === targetDate && status === 'Амжилттай';
     });
 
     if (ok.length === 0) {
-      await ctx.reply(`Амжилттай гүйлгээ алга. Огноо: ${currentDate}`);
+      await ctx.reply(`Амжилттай гүйлгээ алга. Огноо: ${targetDate}`);
       return;
     }
 
-    let msg = `<b>Амжилттай гүйлгээнүүд (${currentDate}):</b>\n\n`;
+    let msg = `<b>Амжилттай гүйлгээнүүд (${targetDate}):</b>\n\n`;
     ok.forEach((r, idx) => {
       const no = r[0] || '';
       const date = r[1] || '';
@@ -268,16 +400,25 @@ bot.command('successful', async (ctx) => {
   }
 });
 
-// /canceled — тухайн огнооны цуцалсан гүйлгээнүүд
+// /canceled [огноо]
 bot.command('canceled', async (ctx) => {
   try {
     const chatId = String(ctx.chat.id);
-    const currentDate = state.currentDate[chatId];
+    
+    // Командын дараах текст авах
+    const args = ctx.message.text.split(/\s+/).slice(1);
+    let targetDate;
+    
+    if (args.length > 0) {
+      // Огноо командын дараа байвал түүнийг ашиглах
+      targetDate = args[0].replace(/-/g, '.');
+    } else {
+      // Огноо байхгүй бол сүүлийн тохируулсан огноо ашиглах
+      targetDate = chatState.getDate(chatId);
+    }
 
-    if (!currentDate) {
-      await ctx.reply(
-        'Эхлээд ямар огнооны гүйлгээг харахаа оруулна уу. Жишээ: 2025.12.05 FRIDAY'
-      );
+    if (!targetDate) {
+      await ctx.reply('Огноо оруулна уу. Жишээ: /canceled 2025.12.05');
       return;
     }
 
@@ -290,15 +431,15 @@ bot.command('canceled', async (ctx) => {
     const canceled = rows.slice(1).filter((r) => {
       const date = r[1] || '';
       const status = r[6] || '';
-      return date === currentDate && status === 'Цуцласан';
+      return date === targetDate && status === 'Цуцласан';
     });
 
     if (canceled.length === 0) {
-      await ctx.reply(`Цуцласан гүйлгээ алга. Огноо: ${currentDate}`);
+      await ctx.reply(`Цуцласан гүйлгээ алга. Огноо: ${targetDate}`);
       return;
     }
 
-    let msg = `<b>Цуцласан гүйлгээнүүд (${currentDate}):</b>\n\n`;
+    let msg = `<b>Цуцласан гүйлгээнүүд (${targetDate}):</b>\n\n`;
     canceled.forEach((r, idx) => {
       const no = r[0] || '';
       const date = r[1] || '';
@@ -314,16 +455,25 @@ bot.command('canceled', async (ctx) => {
   }
 });
 
-// /general — тухайн огнооны тойм
+// /general [огноо]
 bot.command('general', async (ctx) => {
   try {
     const chatId = String(ctx.chat.id);
-    const currentDate = state.currentDate[chatId];
+    
+    // Командын дараах текст авах
+    const args = ctx.message.text.split(/\s+/).slice(1);
+    let targetDate;
+    
+    if (args.length > 0) {
+      // Огноо командын дараа байвал түүнийг ашиглах
+      targetDate = args[0].replace(/-/g, '.');
+    } else {
+      // Огноо байхгүй бол сүүлийн тохируулсан огноо ашиглах
+      targetDate = chatState.getDate(chatId);
+    }
 
-    if (!currentDate) {
-      await ctx.reply(
-        'Эхлээд ямар огнооны тоймыг харахоо оруулна уу. Жишээ: 2025.12.05 FRIDAY'
-      );
+    if (!targetDate) {
+      await ctx.reply('Огноо оруулна уу. Жишээ: /general 2025.12.05');
       return;
     }
 
@@ -339,22 +489,22 @@ bot.command('general', async (ctx) => {
 
     rows.slice(1).forEach((r) => {
       const date = r[1] || '';
-      if (date !== currentDate) return;
+      if (date !== targetDate) return;
 
       const status = r[6] || '';
       if (status === 'Амжилттай') success++;
       else if (status === 'Цуцласан') canceled++;
-      else pending++; // хоосон эсвэл "Хүлээгдэж буй"
+      else pending++;
     });
 
     const total = success + pending + canceled;
     if (total === 0) {
-      await ctx.reply(`Тухайн огноонд гүйлгээ алга. Огноо: ${currentDate}`);
+      await ctx.reply(`Тухайн огноонд гүйлгээ алга. Огноо: ${targetDate}`);
       return;
     }
 
     const msg =
-      `<b>Гүйлгээний тойм (${currentDate}):</b>\n\n` +
+      `<b>Гүйлгээний тойм (${targetDate}):</b>\n\n` +
       `✅ Амжилттай: ${success}\n` +
       `⌛ Хүлээгдэж буй: ${pending}\n` +
       `❌ Цуцласан: ${canceled}\n`;
@@ -366,36 +516,30 @@ bot.command('general', async (ctx) => {
   }
 });
 
-// === ТЕКСТ МЕССЕЖ (ОГНОО, ГҮЙЛГЭЭ, ХАНШ) ===
-bot.on('text', async (ctx, next) => {
-  try {
-    const chatId = String(ctx.chat.id);
-    const text = ctx.message.text.trim();
+// === МЕССЕЖ БОЛОВСРУУЛАХ ФУНКЦ ===
+async function processMessage(ctx, text) {
+  const chatId = String(ctx.chat.id);
 
-    // Комманд байвал -> дараагийн handler руу
-    if (text.startsWith('/')) {
-      return next();
-    }
-
-    // 1) ОГНОО МЕССЕЖ ҮҮ? (2025.12.05 FRIDAY)
+  return await chatState.withLock(chatId, async () => {
+    // 1) ОГНОО МЕССЕЖ ҮҮ?
     const dateMatch = text.match(/^\s*(\d{4}[.\-]\d{2}[.\-]\d{2})(?:\s+\S+)?\s*$/);
     if (dateMatch) {
-      const datePart = dateMatch[1].replace(/-/g, '.'); // 2025-12-05 -> 2025.12.05
-      state.currentDate[chatId] = datePart;
+      const datePart = dateMatch[1].replace(/-/g, '.');
+      chatState.setDate(chatId, datePart);
       await ctx.reply(`Огноо тогтоож авлаа: ${datePart}`);
-      return;
+      return true;
     }
 
-    const currentDate = state.currentDate[chatId];
+    const currentDate = chatState.getDate(chatId);
 
-    // 2) ГҮЙЛГЭЭ МЕССЕЖ ҮҮ? ("Назначение:" + "Сумма:")
+    // 2) ГҮЙЛГЭЭ МЕССЕЖ ҮҮ?
     const hasPurpose = /Назначение:/i.test(text);
     const hasAmount = /Сумма:/i.test(text);
 
     if (hasPurpose && hasAmount) {
       if (!currentDate) {
         await ctx.reply('Эхлээд огноо оруулна уу. Жишээ: 2025.12.05 FRIDAY');
-        return;
+        return true;
       }
 
       const number = extractNumber(text);
@@ -414,112 +558,67 @@ bot.on('text', async (ctx, next) => {
           ]
         }
       });
-      return;
+      return true;
     }
 
     // 3) ӨРТӨГ ХАНШ МЕССЕЖ ҮҮ?
     if (text.startsWith('Өртөг ханш')) {
       if (!currentDate) {
         await ctx.reply('Эхлээд огноо оруулна уу.');
-        return;
+        return true;
       }
 
       const rateMatch = text.match(/Өртөг ханш[:\s]+([\d\.,]+)/i);
       if (!rateMatch) {
         await ctx.reply('Зөв формат: Өртөг ханш: 46,40');
-        return;
+        return true;
       }
 
       let rateStr = rateMatch[1].replace(/\s+/g, '').replace(',', '.');
-      await updateRateForDate(currentDate, rateStr);
-      await ctx.reply(`Өртөг ханш ${rateStr} гэж тохирууллаа ✅`);
-      return;
+      const updated = await updateRateForDate(currentDate, rateStr);
+      await ctx.reply(`Өртөг ханш ${rateStr} гэж тохирууллаа (${updated} мөр) ✅`);
+      return true;
     }
 
-    // 4) БУСАД МЕССЕЖ → үл тооно
-    return;
+    return false;
+  });
+}
+
+// === ТЕКСТ МЕССЕЖ ===
+bot.on('text', async (ctx, next) => {
+  try {
+    const text = ctx.message.text.trim();
+
+    // Комманд байвал -> дараагийн handler руу
+    if (text.startsWith('/')) {
+      return next();
+    }
+
+    await processMessage(ctx, text);
   } catch (err) {
-    console.error(err);
+    console.error('Error in text handler:', err);
     try {
       await ctx.reply('Дотоод алдаа гарлаа 😢');
-    } catch (e) {}
+    } catch (e) {
+      console.error('Failed to send error message:', e);
+    }
   }
 });
 
-// === ЗУРАГТАЙ (PHOTO) МЕССЕЖ — CAPTION-ААР НЬ ТАНИНА ===
+// === ЗУРАГТАЙ (PHOTO) МЕССЕЖ ===
 bot.on('photo', async (ctx) => {
   try {
-    const chatId = String(ctx.chat.id);
     const caption = (ctx.message.caption || '').trim();
-
     if (!caption) return;
 
-    // 1) ОГНОО CAPTION ҮҮ? (2025.12.05 FRIDAY)
-    const dateMatch = caption.match(/^\s*(\d{4}[.\-]\d{2}[.\-]\d{2})(?:\s+\S+)?\s*$/);
-    if (dateMatch) {
-      const datePart = dateMatch[1].replace(/-/g, '.');
-      state.currentDate[chatId] = datePart;
-      await ctx.reply(`Огноо тогтоож авлаа: ${datePart}`);
-      return;
-    }
-
-    const currentDate = state.currentDate[chatId];
-
-    // 2) ГҮЙЛГЭЭ CAPTION ҮҮ? ("Назначение:" + "Сумма:")
-    const hasPurpose = /Назначение:/i.test(caption);
-    const hasAmount = /Сумма:/i.test(caption);
-
-    if (hasPurpose && hasAmount) {
-      if (!currentDate) {
-        await ctx.reply('Эхлээд огноо оруулна уу. Жишээ: 2025.12.05 FRIDAY');
-        return;
-      }
-
-      const number = extractNumber(caption);
-      const description = extractDescription(caption);
-      const amount = extractAmountForExpense(caption);
-
-      const rowIndex = await appendTransactionRow(currentDate, number, description, amount);
-
-      await ctx.reply(`Гүйлгээг бүртгэлээ (зурагтай).\n\n${caption}`, {
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: '✅', callback_data: `status:SUCCESS:${rowIndex}` },
-              { text: '❌', callback_data: `status:CANCELED:${rowIndex}` }
-            ]
-          ]
-        }
-      });
-      return;
-    }
-
-    // 3) ӨРТӨГ ХАНШ CAPTION ҮҮ?
-    if (caption.startsWith('Өртөг ханш')) {
-      if (!currentDate) {
-        await ctx.reply('Эхлээд огноо оруулна уу.');
-        return;
-      }
-
-      const rateMatch = caption.match(/Өртөг ханш[:\s]+([\d\.,]+)/i);
-      if (!rateMatch) {
-        await ctx.reply('Зөв формат: Өртөг ханш: 46,40');
-        return;
-      }
-
-      let rateStr = rateMatch[1].replace(/\s+/g, '').replace(',', '.');
-      await updateRateForDate(currentDate, rateStr);
-      await ctx.reply(`Өртөг ханш ${rateStr} гэж тохирууллаа ✅`);
-      return;
-    }
-
-    // Бусад caption-тэй зураг → sheet-д бичихгүй
-    return;
+    await processMessage(ctx, caption);
   } catch (err) {
-    console.error(err);
+    console.error('Error in photo handler:', err);
     try {
       await ctx.reply('Дотоод алдаа гарлаа (photo) 😢');
-    } catch (e) {}
+    } catch (e) {
+      console.error('Failed to send error message:', e);
+    }
   }
 });
 
@@ -532,7 +631,7 @@ bot.on('callback_query', async (ctx) => {
       return;
     }
 
-    const parts = data.split(':'); // ["status", "SUCCESS", "12"]
+    const parts = data.split(':');
     const statusKey = parts[1];
     const rowIndex = parseInt(parts[2], 10);
 
@@ -547,22 +646,26 @@ bot.on('callback_query', async (ctx) => {
 
     try {
       await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
-    } catch (e) {}
+    } catch (e) {
+      // Товчийг устгаж чадахгүй бол дуугүй үргэлжлүүлнэ
+    }
 
     try {
       await ctx.deleteMessage();
     } catch (e) {
-      console.error('Cannot delete message:', e);
+      // Мессежийг устгаж чадахгүй бол дуугүй үргэлжлүүлнэ
     }
   } catch (err) {
-    console.error(err);
+    console.error('Error in callback_query:', err);
     try {
       await ctx.answerCbQuery('Алдаа гарлаа 😢', { show_alert: true });
-    } catch (e) {}
+    } catch (e) {
+      console.error('Failed to send callback error:', e);
+    }
   }
 });
 
-// === Render / Uptime-д зориулсан ЖИЖИГ HTTP SERVER ===
+// === HTTP SERVER (Render-д зориулсан) ===
 const PORT = process.env.PORT || 3000;
 
 http.createServer((req, res) => {
@@ -579,8 +682,17 @@ http.createServer((req, res) => {
     console.log('Bot started...');
   } catch (err) {
     console.error('Bot launch error:', err);
+    process.exit(1);
   }
 })();
 
-process.once('SIGINT', () => bot.stop('SIGINT'));
-process.once('SIGTERM', () => bot.stop('SIGTERM'));
+// Graceful shutdown
+process.once('SIGINT', () => {
+  console.log('SIGINT received, stopping bot...');
+  bot.stop('SIGINT');
+});
+
+process.once('SIGTERM', () => {
+  console.log('SIGTERM received, stopping bot...');
+  bot.stop('SIGTERM');
+});
