@@ -1,6 +1,7 @@
 const { Telegraf } = require('telegraf');
 const { google } = require('googleapis');
 const path = require('path');
+const http = require('http'); // Render-д зориулсан жижиг HTTP server
 
 // === ЗӨВШӨӨРӨГДСӨН ЧАТУУДЫН ЖАГСААЛТ (WHITELIST) ====
 // Анужин хувийн чат: 1920453419
@@ -13,7 +14,7 @@ const ALLOWED_CHAT_IDS = [
 // === ТОХИРУУЛГА ===
 const BOT_TOKEN = '8108084322:AAEfmQq8uxTlE0L9t3SOQOlIIzQmZ8JwAdI';
 const SPREADSHEET_ID = '1qbxJsI4Ns3a8lluxlRZl5r5AKHA3hp9yS7YZLwY469A';
-const SHEET_NAME = 'Transactions';
+const SHEET_NAME = 'Transactions'; 
 // A:№, B:Огноо, C:Тайлбар, D:Дүн, E:Өртөг ханш, F:Timestamp, G:Статус
 
 // === GOOGLE SHEETS AUTH ===
@@ -33,18 +34,18 @@ auth.getClient()
 // === TELEGRAM BOT ===
 const bot = new Telegraf(BOT_TOKEN);
 
-// ==== ГЛОБАЛ АЛДАА БАРИГЧ ====
+// Глобал алдаа баригч
 bot.catch((err, ctx) => {
   console.error('Telegraf error:', err);
 });
 
-// Чат бүрийн төлөв (огноо, давхар мессежээс хамгаална)
+// Чат бүрийн төлөв
 const state = {
   currentDate: {}, // chatId -> date string (2025.12.05)
   lastMsgId: {},   // chatId -> last message_id
 };
 
-// === БҮХ МЕССЕЖИЙН ӨМНӨ WHITELIST ШАЛГАНА (НИЙТД НЭГ Л УДАА) ===
+// === WHITELIST MIDDLEWARE (НИЙТД НЭГ УДАА) ===
 bot.use(async (ctx, next) => {
   const chatId = ctx.chat && ctx.chat.id ? String(ctx.chat.id) : null;
   if (!chatId) return;
@@ -64,7 +65,7 @@ function extractNumber(text) {
   const lines = text.split('\n').map(l => l.trim());
   const nonEmpty = lines.filter(l => l !== '');
   if (nonEmpty.length === 0) return '';
-  const first = nonEmpty[0];               // ж: "3." эсвэл "3)"
+  const first = nonEmpty[0]; // ж: "3." эсвэл "3)"
   const m = first.match(/^(\d+)[\.\)]?$/);
   return m && m[1] ? m[1] : '';
 }
@@ -516,7 +517,6 @@ bot.on('photo', async (ctx) => {
       }
 
       let rateStr = rateMatch[1].replace(/\s+/g, '').replace(',', '.');
-
       await updateRateForDate(currentDate, rateStr);
       await ctx.reply(`Өртөг ханш ${rateStr} гэж тохирууллаа ✅`);
       return;
@@ -569,6 +569,16 @@ bot.on('callback_query', async (ctx) => {
       await ctx.answerCbQuery('Алдаа гарлаа 😢', { show_alert: true });
     } catch (e) {}
   }
+});
+
+// === Render-д зориулсан ЖИЖИГ HTTP SERVER (PORT BINDING) ===
+const PORT = process.env.PORT || 3000;
+
+http.createServer((req, res) => {
+  res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
+  res.end('OYUNS bot is running ✅\n');
+}).listen(PORT, () => {
+  console.log('HTTP server listening on port', PORT);
 });
 
 // === БОТЫГ АСГАХ ===
