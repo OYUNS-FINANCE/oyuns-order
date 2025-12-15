@@ -1,0 +1,13 @@
+{
+  "name": "oyuns-main-bot",
+  "version": "1.0.0",
+  "main": "index.js",
+  "type": "commonjs",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "googleapis": "^140.0.0",
+    "telegraf": "^4.16.3"
+  }
+}
