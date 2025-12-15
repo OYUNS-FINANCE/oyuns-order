@@ -216,7 +216,7 @@ bot.action(/confirm_partial_(.+)/, async (ctx) => {
   if (!state) return;
 
   state.step = 'waiting_partial_mnt';
-  await ctx.reply('💸 <b>Ороод ирсэн MNT дүн:</b>', { parse_mode: 'HTML' });
+  await ctx.reply('💸 <b>Хүлээн авсан MNT дүн:</b>', { parse_mode: 'HTML' });
 });
 
 /* ================= REPORT ================= */
@@ -246,3 +246,12 @@ bot.command('report', async (ctx) => {
 /* ================= START ================= */
 bot.launch();
 console.log('✅ Bot running');
+
+const server = http.createServer((req, res) => {
+  res.writeHead(200);
+  res.end('OK');
+});
+
+server.listen(CONFIG.PORT, () => {
+  console.log(`✅ HTTP server listening on ${CONFIG.PORT}`);
+});
