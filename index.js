@@ -245,6 +245,62 @@ bot.on('channel_post', async (ctx) => {
   }
 });
 
+// Зургатай гүйлгээний мессеж (photo with caption)
+bot.on('photo', async (ctx) => {
+  try {
+    const chatId = ctx.chat.id;
+    const messageId = ctx.message.message_id;
+    const caption = (ctx.message.caption || '').trim();
+    
+    console.log(`📸 Зураг ирлээ: chatId=${chatId}, caption="${caption.substring(0, 50)}..."`);
+
+    // Проверка разрешенной группы
+    if (chatId !== CONFIG.ALLOWED_GROUP_ID && !CONFIG.ADMIN_IDS.includes(ctx.from.id)) {
+      console.log('⚠️ Зөвшөөрөгдөөгүй chat-аас зураг');
+      return;
+    }
+
+    // Парсинг транзакции из caption
+    const numberMatch = caption.match(/^(\d+)\./m);
+    const назначениеMatch = caption.match(/Назначение:\s*(.+)/i);
+    const суммаMatch = caption.match(/Сумма:\s*([\d,]+\.?\d*)/i);
+
+    if (numberMatch && назначениеMatch && суммаMatch) {
+      const number = numberMatch[1];
+      const назначение = назначениеMatch[1].trim();
+      const rub = parseNumber(суммаMatch[1]);
+
+      console.log(`✅ Гүйлгээ таньсан (зургаас): №${number}, ${назначение}, ${rub} RUB`);
+
+      const stateKey = `${chatId}_${messageId}`;
+      transactionStates.set(stateKey, {
+        number,
+        назначение,
+        rub,
+        chatId,
+        txMessageId: messageId,
+        step: 'waiting_cost_rate',
+        startedAt: new Date().toISOString()
+      });
+
+      await ctx.reply(
+        '💰 <b>Өртөг ханш оруулна уу:</b>',
+        {
+          parse_mode: 'HTML'
+        }
+      );
+      return;
+    }
+  } catch (err) {
+    console.error('❌ Photo handler алдаа:', err);
+    try {
+      await ctx.reply('❌ Алдаа гарлаа. Дахин оролдоно уу.');
+    } catch (replyErr) {
+      console.error('❌ Reply error:', replyErr);
+    }
+  }
+});
+
 // Обработка входящих сообщений о транзакциях
 bot.on('text', async (ctx, next) => {
   try {
@@ -291,7 +347,6 @@ bot.on('text', async (ctx, next) => {
       await ctx.reply(
         '💰 <b>Өртөг ханш оруулна уу:</b>',
         {
-          reply_to_message_id: messageId,
           parse_mode: 'HTML'
         }
       );
@@ -405,6 +460,113 @@ bot.on('text', async (ctx, next) => {
             }
             return;
           }
+        }
+      }
+    }
+
+    // ✅ ШИНЭ: Reply хийхгүйгээр дараагийн мессежээр хариулах
+    // Өртөг ханш хүлээж байна
+    for (const [key, state] of transactionStates.entries()) {
+      if (key.includes(`${chatId}_`) && state.step === 'waiting_cost_rate') {
+        const costRate = parseNumber(text);
+        if (costRate > 0) {
+          state.costRate = costRate;
+          state.step = 'waiting_sell_rate';
+          
+          const rates = await fetchLatestRates();
+          await ctx.reply(
+            '📊 <b>Зарах ханш сонгоно уу:</b>',
+            {
+              parse_mode: 'HTML',
+              ...Markup.inlineKeyboard([
+                [
+                  Markup.button.callback(`🏦 ${rates.org.toFixed(2)}`, `rate_org_${state.txMessageId}`),
+                  Markup.button.callback(`👤 ${rates.person.toFixed(2)}`, `rate_person_${state.txMessageId}`)
+                ],
+                [Markup.button.callback('✍️ Өөр ханш оруулах', `rate_custom_${state.txMessageId}`)]
+              ])
+            }
+          );
+          return;
+        }
+      }
+
+      // Өөр ханш хүлээж байна
+      if (key.includes(`${chatId}_`) && state.step === 'waiting_custom_rate') {
+        const customRate = parseNumber(text);
+        if (customRate > 0) {
+          state.rate = customRate;
+          state.rateType = 'Өөр';
+          await processCommission(ctx, state);
+          return;
+        }
+      }
+
+      // Шимтгэл хүлээж байна
+      if (key.includes(`${chatId}_`) && state.step === 'waiting_commission') {
+        const commission = parseNumber(text);
+        if (commission > 0) {
+          state.commission = commission;
+          await showCalculation(ctx, state);
+          return;
+        }
+      }
+
+      // MNT хэсэгчлэн орох
+      if (key.includes(`${chatId}_`) && state.step === 'waiting_partial_mnt') {
+        const mntReceived = parseNumber(text);
+        if (mntReceived > 0) {
+          state.mntReceived = (state.mntReceived || 0) + mntReceived;
+          state.mntRemaining = state.mntTotal - state.mntReceived;
+          
+          const rowNum = await findTransactionRow(state.txMessageId, chatId);
+          if (rowNum) {
+            await updateTransaction(rowNum, {
+              'mntReceived': state.mntReceived,
+              'mntRemaining': state.mntRemaining,
+              'status': state.mntRemaining <= 0 ? 'Амжилттай' : 'Хэсэгчлэн орсон'
+            });
+          }
+          
+          const calc = formatCalculation(
+            state.rub,
+            state.commission,
+            state.rubTotal,
+            state.rate,
+            state.mntTotal,
+            state.mntReceived
+          );
+          
+          await ctx.reply(
+            `✅ <b>Хэсэгчлэн орлоо:</b> ${formatNumber(mntReceived)} MNT\n\n${calc}`,
+            { parse_mode: 'HTML' }
+          );
+          
+          if (state.mntRemaining <= 0) {
+            const completedAt = new Date().toISOString();
+            const minutes = Math.round((new Date(completedAt) - new Date(state.startedAt)) / 60000);
+            
+            if (rowNum) {
+              await updateTransaction(rowNum, {
+                'completedAt': completedAt,
+                'minutes': minutes,
+                'status': 'Амжилттай'
+              });
+            }
+            
+            await ctx.reply('🎉 <b>Гүйлгээ амжилттай хаагдлаа!</b>', { parse_mode: 'HTML' });
+            transactionStates.delete(key);
+          } else {
+            state.step = 'waiting_confirmation';
+            await ctx.reply(
+              '💵 <b>MNT бүтэн орсон уу?</b>',
+              Markup.inlineKeyboard([
+                [Markup.button.callback('✅ Бүтэн орсон', `confirm_full_${state.txMessageId}`)],
+                [Markup.button.callback('🟠 Дахин хэсэгчлэн орсон', `confirm_partial_${state.txMessageId}`)]
+              ])
+            );
+          }
+          return;
         }
       }
     }
