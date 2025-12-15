@@ -768,14 +768,18 @@ bot.command('debug', async (ctx) => {
 });
 
 // ========== SERVER SETUP (для Render) ==========
-const server = http.createServer((req, res) => {
-  res.writeHead(200);
-  res.end('OYUNS Bot is running!');
-});
+// Webhook mode дээр Telegraf өөрөө server үүсгэнэ
+// Polling mode дээр л энэ server хэрэгтэй
+if (!CONFIG.WEBHOOK_DOMAIN) {
+  const server = http.createServer((req, res) => {
+    res.writeHead(200);
+    res.end('OYUNS Bot is running!');
+  });
 
-server.listen(CONFIG.PORT, () => {
-  console.log(`Server running on port ${CONFIG.PORT}`);
-});
+  server.listen(CONFIG.PORT, () => {
+    console.log(`Server running on port ${CONFIG.PORT}`);
+  });
+}
 
 // ========== BOT LAUNCH ==========
 async function startBot() {
