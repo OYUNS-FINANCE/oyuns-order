@@ -9,10 +9,10 @@ const CONFIG = {
   BOT_TOKEN: process.env.BOT_TOKEN,
   SPREADSHEET_ID: process.env.SPREADSHEET_ID,
   RATE_CHANNEL_ID: '-1003355216653',
-  ALLOWED_GROUP_ID: '-5069100118', // string болгож хадгалж байна
+  ALLOWED_GROUP_ID: '-5069100118', // string
   ADMIN_IDS: [1447446407, 1920453419],
   PORT: Number(process.env.PORT || 3000),
-  WEBHOOK_DOMAIN: process.env.WEBHOOK_DOMAIN || process.env.RENDER_EXTERNAL_URL // https://xxx.onrender.com
+  WEBHOOK_DOMAIN: process.env.WEBHOOK_DOMAIN || process.env.RENDER_EXTERNAL_URL // e.g. https://xxx.onrender.com
 };
 
 if (!CONFIG.BOT_TOKEN) throw new Error('BOT_TOKEN байхгүй байна (ENV)');
@@ -26,11 +26,10 @@ const auth = new google.auth.GoogleAuth({
   keyFile: '/etc/secrets/service-account.json',
   scopes: ['https://www.googleapis.com/auth/spreadsheets'],
 });
-
 const sheets = google.sheets({ version: 'v4', auth });
 const SHEET_NAME = 'Transactions2';
 
-// ========== SIMPLE LOCK (Sheets write collision) ==========
+// ========== SIMPLE LOCK ==========
 let sheetsLock = Promise.resolve();
 const lockSheets = (fn) => {
   sheetsLock = sheetsLock.then(fn).catch(fn);
@@ -266,27 +265,98 @@ bot.start(async (ctx) => {
 📊 Тайлан:
 - /report — өнөөдрийн тайлан
 - /debug — шалгах мэдээлэл
-- /ping — бот амьд эсэх
-
-Хэрвээ ямар нэг юм ажиллахгүй бол /debug гэж бичээд log-оо шалгаарай.`;
+- /ping — бот амьд эсэх`;
 
   await ctx.reply(msg, { parse_mode: 'Markdown' });
 });
 
+bot.command('ping', async (ctx) => {
+  await ctx.reply(`pong ✅\nchatId=${ctx.chat.id}\nuserId=${ctx.from.id}\ntype=${ctx.chat.type}`);
+});
+
+bot.command('debug', async (ctx) => {
+  const info =
+`🔍 <b>DEBUG</b>
+
+💬 Chat ID: <code>${ctx.chat.id}</code>
+👤 User ID: <code>${ctx.from.id}</code>
+
+💰 Ханш:
+- 🏦 Байгууллага: ${cachedRates.org}
+- 👤 Хувь хүн: ${cachedRates.person}
+
+${isUserAllowed(ctx) ? '✅' : '❌'} Allowed`;
+  await ctx.reply(info, { parse_mode: 'HTML' });
+});
+
+// ========== CAPTION PARSE (photo / document) ==========
+async function handleCaptionTransaction(ctx, caption) {
+  if (!isUserAllowed(ctx)) return;
+  if (!caption) return;
+
+  const chatId = ctx.chat.id;
+  const messageId = ctx.message.message_id;
+
+  const numberMatch = caption.match(/^(\d+)\./m);
+  const назначениеMatch = caption.match(/назначени[её][^:]*:\s*(.+)/im);
+  const суммаMatch = caption.match(/сумма:\s*([\d,.\s]+)/im);
+
+  if (numberMatch && назначениеMatch && суммаMatch) {
+    const number = numberMatch[1];
+    const назначение = назначениеMatch[1].trim();
+    const rub = parseNumber(суммаMatch[1]);
+
+    const stateKey = `${chatId}_${messageId}`;
+    transactionStates.set(stateKey, {
+      number,
+      назначение,
+      rub,
+      chatId,
+      txMessageId: messageId,
+      step: 'waiting_cost_rate',
+      startedAt: new Date().toISOString()
+    });
+
+    await ctx.reply(
+      '💰 <b>Өртөг ханш оруулна уу:</b>\n<i>👆 Энэ мессежид reply хийж бичнэ үү</i>',
+      { reply_to_message_id: messageId, parse_mode: 'HTML' }
+    );
+  }
+}
+
 bot.on('photo', async (ctx) => {
   try {
+    await handleCaptionTransaction(ctx, ctx.message?.caption || '');
+  } catch (err) {
+    console.error('❌ photo handler error:', err);
+  }
+});
+
+bot.on('document', async (ctx) => {
+  try {
+    await handleCaptionTransaction(ctx, ctx.message?.caption || '');
+  } catch (err) {
+    console.error('❌ document handler error:', err);
+  }
+});
+
+// ========== TEXT HANDLER ==========
+bot.on('text', async (ctx, next) => {
+  try {
+    const text = ctx.message?.text || '';
+
+    // ✅ command-уудыг bot.command руу нэвтрүүлнэ
+    if (text.startsWith('/')) return next();
+
     if (!isUserAllowed(ctx)) return;
 
-    const caption = ctx.message?.caption || '';
-    if (!caption) return; // caption байхгүй бол алгасна
-
-    // Caption-аас яг текст шиг parse хийнэ
     const chatId = ctx.chat.id;
     const messageId = ctx.message.message_id;
 
-    const numberMatch = caption.match(/^(\d+)\./m);
-    const назначениеMatch = caption.match(/назначени[её][^:]*:\s*(.+)/im);
-    const суммаMatch = caption.match(/сумма:\s*([\d,.\s]+)/im);
+    // 1) NEW TX detect
+    const numberMatch = text.match(/^(\d+)\./m);
+    const назначениеMatch = text.match(/назначени[её][^:]*:\s*(.+)/im);
+    const суммаMatch = text.match(/сумма:\s*([\d,.\s]+)/im);
 
     if (numberMatch && назначениеMatch && суммаMatch) {
       const number = numberMatch[1];
@@ -304,57 +374,14 @@ bot.on('photo', async (ctx) => {
         startedAt: new Date().toISOString()
       });
 
-      await ctx.reply('💰 <b>Өртөг ханш оруулна уу:</b>\n<i>👆 Зургийн мессежид reply хийж бичнэ үү</i>', {
-        reply_to_message_id: messageId,
-        parse_mode: 'HTML'
-      });
-    }
-  } catch (err) {
-    console.error('❌ Photo caption parse error:', err);
-  }
-});
-
-// ========== TEXT HANDLER ==========
-bot.on('text', async (ctx, next) => {
-  try {
-    // ✅ Command бол дараагийн middleware руу явуулна (/report, /debug, ...)
-    const text = ctx.message?.text || '';
-    if (text.startsWith('/')) return next();
-
-    if (!isUserAllowed(ctx)) return;
-
-    // --- эндээс доош чиний хуучин text logic яг хэвээр ---
-    const chatId = ctx.chat.id;
-    const messageId = ctx.message.message_id;
-
-    // NEW TX detect
-    const numberMatch = text.match(/^(\d+)\./m);
-    const назначениеMatch = text.match(/назначени[её][^:]*:\s*(.+)/im);
-    const суммаMatch = text.match(/сумма:\s*([\d,.\s]+)/im);
-
-    if (numberMatch && назначениеMatch && суммаMatch) {
-      // ... (хуучин код чинь)
+      await ctx.reply(
+        '💰 <b>Өртөг ханш оруулна уу:</b>\n<i>👆 Дээрх мессежид reply хийж бичнэ үү</i>',
+        { reply_to_message_id: messageId, parse_mode: 'HTML' }
+      );
       return;
     }
 
-    // ... (хуучин state logic чинь)
-    // --- энд хүртэл ---
-
-    return;
-  } catch (err) {
-    console.error('❌ Text handler error:', err);
-    return next();
-  }
-});
-
-      await ctx.reply('💰 <b>Өртөг ханш оруулна уу:</b>\n<i>👆 Дээрх мессежид reply хийж бичнэ үү</i>', {
-        reply_to_message_id: messageId,
-        parse_mode: 'HTML'
-      });
-      return;
-    }
-
-    // Find state (reply first, else active)
+    // 2) Find state
     let activeState = null;
     if (ctx.message.reply_to_message) {
       activeState = findStateByTxId(chatId, ctx.message.reply_to_message.message_id);
@@ -362,6 +389,7 @@ bot.on('text', async (ctx, next) => {
     if (!activeState) activeState = findActiveState(chatId);
     if (!activeState) return;
 
+    // waiting_cost_rate
     if (activeState.step === 'waiting_cost_rate') {
       if (!ctx.message.reply_to_message) {
         await ctx.reply('⚠️ <b>Гүйлгээний мессежид reply хийж өртөг ханш оруулна уу!</b>', {
@@ -395,6 +423,7 @@ bot.on('text', async (ctx, next) => {
       return;
     }
 
+    // waiting_custom_rate
     if (activeState.step === 'waiting_custom_rate') {
       const customRate = parseNumber(text);
       if (customRate <= 0) {
@@ -407,6 +436,7 @@ bot.on('text', async (ctx, next) => {
       return;
     }
 
+    // waiting_commission
     if (activeState.step === 'waiting_commission') {
       const commission = parseNumber(text);
       if (commission <= 0) {
@@ -418,6 +448,7 @@ bot.on('text', async (ctx, next) => {
       return;
     }
 
+    // waiting_partial_mnt
     if (activeState.step === 'waiting_partial_mnt') {
       const mnt = parseNumber(text);
       if (mnt <= 0) {
@@ -474,6 +505,7 @@ bot.on('text', async (ctx, next) => {
     }
   } catch (err) {
     console.error('❌ Text handler error:', err);
+    return next?.();
   }
 });
 
@@ -654,6 +686,7 @@ bot.action(/confirm_partial_(.+)/, async (ctx) => {
   }
 });
 
+// ========== REPORT ==========
 bot.command('report', async (ctx) => {
   if (!isUserAllowed(ctx)) return;
 
