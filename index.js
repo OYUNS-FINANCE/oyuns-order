@@ -246,35 +246,47 @@ async function showCalculation(ctx, state) {
 }
 
 // ========== BASIC COMMANDS ==========
-bot.start((ctx) => ctx.reply('✅ Bot ажиллаж байна'));
-bot.command('ping', (ctx) => ctx.reply(`pong ✅\nchatId=${ctx.chat.id}\nuserId=${ctx.from.id}\ntype=${ctx.chat.type}`));
+bot.start(async (ctx) => {
+  const msg =
+`👋 Сайн байна уу!
 
-bot.command('debug', async (ctx) => {
-  let info = '🔍 <b>DEBUG</b>\n\n';
-  info += `💬 Chat ID: <code>${ctx.chat.id}</code>\n`;
-  info += `👤 User ID: <code>${ctx.from.id}</code>\n\n`;
-  info += `💰 Ханш:\n`;
-  info += `- 🏦 Байгууллага: ${cachedRates.org}\n`;
-  info += `- 👤 Хувь хүн: ${cachedRates.person}\n`;
-  info += `\n${isUserAllowed(ctx) ? '✅' : '❌'} Allowed`;
-  await ctx.reply(info, { parse_mode: 'HTML' });
+Би OYUNS Bot. Гүйлгээний тооцоо, бүртгэл болон тайлан гаргахад тусална.
+
+🧾 *Шинэ гүйлгээ оруулах формат:*
+1.
+назначение: Тайлбар
+сумма: 10000
+
+📌 Дараалал:
+1) Дээрх форматаар мессеж явуулна
+2) Бот “Өртөг ханш” асууна — тухайн мессежид *reply* хийгээд тоогоо бичнэ
+3) Дараа нь “Зарах ханш”-аа сонгоно (🏦/👤 эсвэл өөрөө бичиж болно)
+4) Бот тооцоо гаргаад баталгаажуулна
+
+📊 Тайлан:
+- /report — өнөөдрийн тайлан
+- /debug — шалгах мэдээлэл
+- /ping — бот амьд эсэх
+
+Хэрвээ ямар нэг юм ажиллахгүй бол /debug гэж бичээд log-оо шалгаарай.`;
+
+  await ctx.reply(msg, { parse_mode: 'Markdown' });
 });
 
-// ========== TEXT HANDLER ==========
-bot.on('text', async (ctx) => {
+bot.on('photo', async (ctx) => {
   try {
     if (!isUserAllowed(ctx)) return;
 
+    const caption = ctx.message?.caption || '';
+    if (!caption) return; // caption байхгүй бол алгасна
+
+    // Caption-аас яг текст шиг parse хийнэ
     const chatId = ctx.chat.id;
     const messageId = ctx.message.message_id;
-    const text = ctx.message.text || '';
 
-    if (text.startsWith('/')) return;
-
-    // NEW TX detect
-    const numberMatch = text.match(/^(\d+)\./m);
-    const назначениеMatch = text.match(/назначени[её][^:]*:\s*(.+)/im);
-    const суммаMatch = text.match(/сумма:\s*([\d,.\s]+)/im);
+    const numberMatch = caption.match(/^(\d+)\./m);
+    const назначениеMatch = caption.match(/назначени[её][^:]*:\s*(.+)/im);
+    const суммаMatch = caption.match(/сумма:\s*([\d,.\s]+)/im);
 
     if (numberMatch && назначениеMatch && суммаMatch) {
       const number = numberMatch[1];
@@ -291,6 +303,49 @@ bot.on('text', async (ctx) => {
         step: 'waiting_cost_rate',
         startedAt: new Date().toISOString()
       });
+
+      await ctx.reply('💰 <b>Өртөг ханш оруулна уу:</b>\n<i>👆 Зургийн мессежид reply хийж бичнэ үү</i>', {
+        reply_to_message_id: messageId,
+        parse_mode: 'HTML'
+      });
+    }
+  } catch (err) {
+    console.error('❌ Photo caption parse error:', err);
+  }
+});
+
+// ========== TEXT HANDLER ==========
+bot.on('text', async (ctx, next) => {
+  try {
+    // ✅ Command бол дараагийн middleware руу явуулна (/report, /debug, ...)
+    const text = ctx.message?.text || '';
+    if (text.startsWith('/')) return next();
+
+    if (!isUserAllowed(ctx)) return;
+
+    // --- эндээс доош чиний хуучин text logic яг хэвээр ---
+    const chatId = ctx.chat.id;
+    const messageId = ctx.message.message_id;
+
+    // NEW TX detect
+    const numberMatch = text.match(/^(\d+)\./m);
+    const назначениеMatch = text.match(/назначени[её][^:]*:\s*(.+)/im);
+    const суммаMatch = text.match(/сумма:\s*([\d,.\s]+)/im);
+
+    if (numberMatch && назначениеMatch && суммаMatch) {
+      // ... (хуучин код чинь)
+      return;
+    }
+
+    // ... (хуучин state logic чинь)
+    // --- энд хүртэл ---
+
+    return;
+  } catch (err) {
+    console.error('❌ Text handler error:', err);
+    return next();
+  }
+});
 
       await ctx.reply('💰 <b>Өртөг ханш оруулна уу:</b>\n<i>👆 Дээрх мессежид reply хийж бичнэ үү</i>', {
         reply_to_message_id: messageId,
