@@ -5,7 +5,7 @@ const http = require('http');
 // ========== CONFIG ==========
 const CONFIG = {
   BOT_TOKEN: process.env.BOT_TOKEN || '7716759809:AAHRwI4cgQJd8KXcJcHbQVw2FZFueBja1G0
-E',
+',
   SPREADSHEET_ID: process.env.SPREADSHEET_ID || '1qbxJsI4Ns3a8lluxlRZl5r5AKHA3hp9yS7YZLwY469A
 ',
   RATE_CHANNEL_ID: '-1003355216653',
