@@ -1,40 +1,33 @@
-'use strict';
-
 const express = require('express');
 const { Telegraf, Markup } = require('telegraf');
 const { google } = require('googleapis');
 
 // ========== CONFIG ==========
 const CONFIG = {
-  BOT_TOKEN: process.env.BOT_TOKEN,
-  SPREADSHEET_ID: process.env.SPREADSHEET_ID,
+  BOT_TOKEN: process.env.BOT_TOKEN || '7716759809:AAHRwI4cgQJd8KXcJcHbQVw2FZFueBja1G0',
+  SPREADSHEET_ID: process.env.SPREADSHEET_ID || '1qbxJsI4Ns3a8lluxlRZl5r5AKHA3hp9yS7YZLwY469A',
   RATE_CHANNEL_ID: '-1003355216653',
-  ALLOWED_GROUP_ID: '-5069100118', // string
+  ALLOWED_GROUP_ID: '-5069100118',
   ADMIN_IDS: [1447446407, 1920453419],
   PORT: Number(process.env.PORT || 3000),
-  WEBHOOK_DOMAIN: process.env.WEBHOOK_DOMAIN || process.env.RENDER_EXTERNAL_URL // e.g. https://xxx.onrender.com
+  WEBHOOK_DOMAIN: process.env.WEBHOOK_DOMAIN || process.env.RENDER_EXTERNAL_URL
 };
 
-if (!CONFIG.BOT_TOKEN) throw new Error('BOT_TOKEN байхгүй байна (ENV)');
-if (!CONFIG.SPREADSHEET_ID) throw new Error('SPREADSHEET_ID байхгүй байна (ENV)');
-if (!CONFIG.WEBHOOK_DOMAIN) throw new Error('WEBHOOK_DOMAIN эсвэл RENDER_EXTERNAL_URL байхгүй байна (ENV)');
+if (!CONFIG.BOT_TOKEN) throw new Error('BOT_TOKEN байхгүй');
+if (!CONFIG.WEBHOOK_DOMAIN) console.warn('⚠️ WEBHOOK_DOMAIN байхгүй - polling mode ашиглана');
 
 const bot = new Telegraf(CONFIG.BOT_TOKEN);
 
 // ========== GOOGLE SHEETS ==========
 const auth = new google.auth.GoogleAuth({
   keyFile: '/etc/secrets/service-account.json',
-  scopes: ['https://www.googleapis.com/auth/spreadsheets'],
+  scopes: ['https://www.googleapis.com/auth/spreadsheets']
 });
 const sheets = google.sheets({ version: 'v4', auth });
 const SHEET_NAME = 'Transactions2';
 
-// ========== SIMPLE LOCK ==========
 let sheetsLock = Promise.resolve();
-const lockSheets = (fn) => {
-  sheetsLock = sheetsLock.then(fn).catch(fn);
-  return sheetsLock;
-};
+const lockSheets = (fn) => { sheetsLock = sheetsLock.then(fn).catch(fn); return sheetsLock; };
 
 // ========== STATE ==========
 const transactionStates = new Map();
@@ -52,8 +45,19 @@ function parseNumber(str) {
   return parseFloat(String(str).replace(/[,\s]/g, '').trim()) || 0;
 }
 
-function formatNumber(num) {
-  return Number(num || 0).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+function formatNumber(num, decimals = 2) {
+  return Number(num || 0).toLocaleString('en-US', { 
+    minimumFractionDigits: decimals, 
+    maximumFractionDigits: decimals 
+  });
+}
+
+function formatMNT(num) {
+  return '₮' + Number(num || 0).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+}
+
+function formatRUB(num) {
+  return '₽' + formatNumber(num, 2);
 }
 
 function formatCalculation(rub, commission, rubTotal, rate, mntTotal, mntReceived = null) {
@@ -90,22 +94,22 @@ function findActiveState(chatId) {
   return null;
 }
 
-// ========== GOOGLE SHEETS OPS ==========
+// ========== SHEETS OPS ==========
 async function appendTransaction(data) {
   return lockSheets(async () => {
-    const values = [[
-      data.number, data.date, data.назначение, data.rub, data.rate,
-      data.commission, data.rubTotal, data.mntTotal, data.mntReceived || 0,
-      data.mntRemaining, data.status, data.startedAt, data.completedAt || '',
-      data.minutes || '', data.chatId, data.txMessageId, data.calcMessageId || '',
-      data.rateType || '', data.costRate || ''
-    ]];
-
     await sheets.spreadsheets.values.append({
       spreadsheetId: CONFIG.SPREADSHEET_ID,
       range: `${SHEET_NAME}!A:S`,
       valueInputOption: 'USER_ENTERED',
-      resource: { values }
+      resource: {
+        values: [[
+          data.number, data.date, data.назначение, data.rub, data.rate,
+          data.commission, data.rubTotal, data.mntTotal, data.mntReceived || 0,
+          data.mntRemaining, data.status, data.startedAt, data.completedAt || '',
+          data.minutes || '', data.chatId, data.txMessageId, data.calcMessageId || '',
+          data.rateType || '', data.costRate || ''
+        ]]
+      }
     });
   });
 }
@@ -126,11 +130,10 @@ async function findTransactionRow(txMessageId, chatId) {
 async function updateTransaction(rowNum, updates) {
   return lockSheets(async () => {
     const cols = {
-      number: 0, date: 1, назначение: 2, rub: 3, rate: 4,
-      commission: 5, rubTotal: 6, mntTotal: 7, mntReceived: 8,
-      mntRemaining: 9, status: 10, startedAt: 11, completedAt: 12,
-      minutes: 13, chatId: 14, txMessageId: 15, calcMessageId: 16,
-      rateType: 17, costRate: 18
+      number: 0, date: 1, назначение: 2, rub: 3, rate: 4, commission: 5,
+      rubTotal: 6, mntTotal: 7, mntReceived: 8, mntRemaining: 9, status: 10,
+      startedAt: 11, completedAt: 12, minutes: 13, chatId: 14, txMessageId: 15,
+      calcMessageId: 16, rateType: 17, costRate: 18
     };
 
     const requests = [];
@@ -153,32 +156,37 @@ async function updateTransaction(rowNum, updates) {
   });
 }
 
-async function getTodayTransactions() {
+async function getTransactionsByDateRange(startDate, endDate) {
   const response = await sheets.spreadsheets.values.get({
     spreadsheetId: CONFIG.SPREADSHEET_ID,
     range: `${SHEET_NAME}!A:S`
   });
 
   const rows = response.data.values || [];
-  const today = new Date().toISOString().split('T')[0];
-
   const transactions = [];
+
   for (let i = 1; i < rows.length; i++) {
     const row = rows[i];
     const date = row[1] ? String(row[1]).split('T')[0] : '';
-    if (date === today) {
+    
+    if (date >= startDate && date <= endDate) {
       transactions.push({
         number: row[0],
-        назначение: row[2],
+        date: row[1],
+        назначение: row[2] || '',
         rub: parseNumber(row[3]),
         rate: parseNumber(row[4]),
+        commission: parseNumber(row[5]),
+        rubTotal: parseNumber(row[6]),
         mntTotal: parseNumber(row[7]),
+        mntReceived: parseNumber(row[8]),
         mntRemaining: parseNumber(row[9]),
-        status: row[10],
+        status: row[10] || '',
         costRate: parseNumber(row[18])
       });
     }
   }
+
   return transactions;
 }
 
@@ -215,7 +223,7 @@ async function processCommission(ctx, state) {
     state.step = 'waiting_commission';
     await ctx.reply(
       `💰 <b>Шимтгэл хэд вэ?</b>\n(Санал: ${formatNumber(defaultCommission)} RUB)`,
-      { parse_mode: 'HTML', reply_to_message_id: state.txMessageId }
+      { parse_mode: 'HTML' }
     );
   } else {
     state.commission = defaultCommission;
@@ -244,10 +252,9 @@ async function showCalculation(ctx, state) {
   state.step = 'calculation_shown';
 }
 
-// ========== BASIC COMMANDS ==========
+// ========== COMMANDS ==========
 bot.start(async (ctx) => {
-  const msg =
-`👋 Сайн байна уу!
+  const msg = `👋 Сайн байна уу!
 
 Би OYUNS Bot. Гүйлгээний тооцоо, бүртгэл болон тайлан гаргахад тусална.
 
@@ -256,27 +263,20 @@ bot.start(async (ctx) => {
 назначение: Тайлбар
 сумма: 10000
 
-📌 Дараалал:
-1) Дээрх форматаар мессеж явуулна
-2) Бот “Өртөг ханш” асууна — тухайн мессежид *reply* хийгээд тоогоо бичнэ
-3) Дараа нь “Зарах ханш”-аа сонгоно (🏦/👤 эсвэл өөрөө бичиж болно)
-4) Бот тооцоо гаргаад баталгаажуулна
-
 📊 Тайлан:
 - /report — өнөөдрийн тайлан
-- /debug — шалгах мэдээлэл
-- /ping — бот амьд эсэх`;
+- /report 7 — 7 хоногийн тайлан
+- /report 2024-01-01 2024-01-31 — огнооны хоорондох тайлан`;
 
   await ctx.reply(msg, { parse_mode: 'Markdown' });
 });
 
 bot.command('ping', async (ctx) => {
-  await ctx.reply(`pong ✅\nchatId=${ctx.chat.id}\nuserId=${ctx.from.id}\ntype=${ctx.chat.type}`);
+  await ctx.reply(`pong ✅\nchatId=${ctx.chat.id}\nuserId=${ctx.from.id}`);
 });
 
 bot.command('debug', async (ctx) => {
-  const info =
-`🔍 <b>DEBUG</b>
+  const info = `🔍 <b>DEBUG</b>
 
 💬 Chat ID: <code>${ctx.chat.id}</code>
 👤 User ID: <code>${ctx.from.id}</code>
@@ -289,54 +289,103 @@ ${isUserAllowed(ctx) ? '✅' : '❌'} Allowed`;
   await ctx.reply(info, { parse_mode: 'HTML' });
 });
 
-// ========== CAPTION PARSE (photo / document) ==========
-async function handleCaptionTransaction(ctx, caption) {
+// ========== REPORT COMMAND ==========
+bot.command('report', async (ctx) => {
   if (!isUserAllowed(ctx)) return;
-  if (!caption) return;
 
-  const chatId = ctx.chat.id;
-  const messageId = ctx.message.message_id;
-
-  const numberMatch = caption.match(/^(\d+)\./m);
-  const назначениеMatch = caption.match(/назначени[её][^:]*:\s*(.+)/im);
-  const суммаMatch = caption.match(/сумма:\s*([\d,.\s]+)/im);
-
-  if (numberMatch && назначениеMatch && суммаMatch) {
-    const number = numberMatch[1];
-    const назначение = назначениеMatch[1].trim();
-    const rub = parseNumber(суммаMatch[1]);
-
-    const stateKey = `${chatId}_${messageId}`;
-    transactionStates.set(stateKey, {
-      number,
-      назначение,
-      rub,
-      chatId,
-      txMessageId: messageId,
-      step: 'waiting_cost_rate',
-      startedAt: new Date().toISOString()
-    });
-
-    await ctx.reply(
-      '💰 <b>Өртөг ханш оруулна уу:</b>\n<i>👆 Энэ мессежид reply хийж бичнэ үү</i>',
-      { reply_to_message_id: messageId, parse_mode: 'HTML' }
-    );
-  }
-}
-
-bot.on('photo', async (ctx) => {
   try {
-    await handleCaptionTransaction(ctx, ctx.message?.caption || '');
-  } catch (err) {
-    console.error('❌ photo handler error:', err);
-  }
-});
+    const args = ctx.message.text.split(' ').slice(1);
+    let startDate, endDate;
 
-bot.on('document', async (ctx) => {
-  try {
-    await handleCaptionTransaction(ctx, ctx.message?.caption || '');
+    const today = new Date();
+    today.setHours(today.getHours() + 1); // Europe/Amsterdam ~UTC+1
+    const todayStr = today.toISOString().split('T')[0];
+
+    if (args.length === 0) {
+      startDate = endDate = todayStr;
+    } else if (args.length === 1 || (args.length === 2 && args[1] === 'хоног')) {
+      const days = parseInt(args[0]) || 1;
+      const start = new Date(today);
+      start.setDate(start.getDate() - days + 1);
+      startDate = start.toISOString().split('T')[0];
+      endDate = todayStr;
+    } else if (args.length === 2) {
+      startDate = args[0];
+      endDate = args[1];
+    } else {
+      await ctx.reply('❌ Буруу формат. Жишээ:\n/report\n/report 7\n/report 2024-01-01 2024-01-31');
+      return;
+    }
+
+    const transactions = await getTransactionsByDateRange(startDate, endDate);
+
+    if (transactions.length === 0) {
+      await ctx.reply('📊 Тайлан\nСонгосон хугацаанд гүйлгээ байхгүй байна.');
+      return;
+    }
+
+    const completed = transactions.filter(t => t.status === 'Амжилттай');
+    const pending = transactions.filter(t => t.status !== 'Амжилттай');
+
+    const totalMNT = transactions.reduce((s, t) => s + t.mntTotal, 0);
+    const totalRUB = transactions.reduce((s, t) => s + t.rubTotal, 0);
+    const totalProfit = transactions.reduce((s, t) => s + (t.rate - t.costRate) * t.rub, 0);
+    const lossTransactions = transactions.filter(t => (t.rate - t.costRate) * t.rub < 0);
+    const totalLoss = Math.abs(lossTransactions.reduce((s, t) => s + (t.rate - t.costRate) * t.rub, 0));
+
+    let report = `📊 <b>Тайлан</b> (${startDate} — ${endDate})\n\n`;
+    report += `📈 Товч мэдээлэл:\n`;
+    report += `Нийт гүйлгээний дүн: ${formatMNT(totalMNT)} / ${formatRUB(totalRUB)}\n`;
+    report += `Нийт ашиг: ${formatMNT(totalProfit)}\n`;
+    report += `Нийт гүйлгээний тоо: ${transactions.length}\n\n`;
+
+    report += `📊 Гүйлгээний төлөв:\n`;
+    report += `Амжилттай: ${completed.length}\n`;
+    report += `Хүлээгдэж байгаа: ${pending.length}\n\n`;
+
+    if (lossTransactions.length > 0) {
+      report += `🔽 Алдагдалтай гүйлгээний тоо: ${lossTransactions.length}\n`;
+      report += `Алдагдлын хэмжээ: ${formatMNT(totalLoss)}\n\n`;
+    }
+
+    if (pending.length > 0) {
+      report += `<b>Хүлээгдэж буй гүйлгээ:</b>\n\n`;
+      
+      for (const t of pending) {
+        report += `${t.number}. Назначение: ${t.назначение}\n`;
+        
+        const calc = formatCalculation(t.rub, t.commission, t.rubTotal, t.rate, t.mntTotal, t.mntReceived);
+        report += `Тооцоо:\n${calc}\n`;
+        report += `Үлдэгдэл: ${formatMNT(t.mntRemaining)}\n\n`;
+      }
+    } else {
+      report += `<b>Хүлээгдэж буй гүйлгээ:</b> Байхгүй`;
+    }
+
+    // Split long messages
+    if (report.length > 4096) {
+      const chunks = [];
+      let current = '';
+      
+      for (const line of report.split('\n')) {
+        if ((current + line + '\n').length > 4000) {
+          chunks.push(current);
+          current = line + '\n';
+        } else {
+          current += line + '\n';
+        }
+      }
+      if (current) chunks.push(current);
+
+      for (const chunk of chunks) {
+        await ctx.reply(chunk, { parse_mode: 'HTML' });
+      }
+    } else {
+      await ctx.reply(report, { parse_mode: 'HTML' });
+    }
   } catch (err) {
-    console.error('❌ document handler error:', err);
+    console.error('❌ Report error:', err);
+    await ctx.reply('❌ Тайлан гаргахад алдаа гарлаа.');
   }
 });
 
@@ -344,64 +393,43 @@ bot.on('document', async (ctx) => {
 bot.on('text', async (ctx, next) => {
   try {
     const text = ctx.message?.text || '';
-
-    // ✅ command-уудыг bot.command руу нэвтрүүлнэ
     if (text.startsWith('/')) return next();
-
     if (!isUserAllowed(ctx)) return;
 
     const chatId = ctx.chat.id;
     const messageId = ctx.message.message_id;
 
-    // 1) NEW TX detect
     const numberMatch = text.match(/^(\d+)\./m);
     const назначениеMatch = text.match(/назначени[её][^:]*:\s*(.+)/im);
     const суммаMatch = text.match(/сумма:\s*([\d,.\s]+)/im);
 
     if (numberMatch && назначениеMatch && суммаMatch) {
-      const number = numberMatch[1];
-      const назначение = назначениеMatch[1].trim();
-      const rub = parseNumber(суммаMatch[1]);
-
       const stateKey = `${chatId}_${messageId}`;
       transactionStates.set(stateKey, {
-        number,
-        назначение,
-        rub,
+        number: numberMatch[1],
+        назначение: назначениеMatch[1].trim(),
+        rub: parseNumber(суммаMatch[1]),
         chatId,
         txMessageId: messageId,
         step: 'waiting_cost_rate',
         startedAt: new Date().toISOString()
       });
 
-      await ctx.reply(
-        '💰 <b>Өртөг ханш оруулна уу:</b>\n<i>👆 Дээрх мессежид reply хийж бичнэ үү</i>',
-        { reply_to_message_id: messageId, parse_mode: 'HTML' }
-      );
+      await ctx.reply('💰 <b>Өртөг ханш оруулна уу:</b>', {
+        reply_to_message_id: messageId,
+        parse_mode: 'HTML'
+      });
       return;
     }
 
-    // 2) Find state
-    let activeState = null;
-    if (ctx.message.reply_to_message) {
-      activeState = findStateByTxId(chatId, ctx.message.reply_to_message.message_id);
-    }
-    if (!activeState) activeState = findActiveState(chatId);
+    // Идэвхтэй гүйлгээ хайх (reply шаардлагагүй)
+    let activeState = findActiveState(chatId);
     if (!activeState) return;
 
-    // waiting_cost_rate
     if (activeState.step === 'waiting_cost_rate') {
-      if (!ctx.message.reply_to_message) {
-        await ctx.reply('⚠️ <b>Гүйлгээний мессежид reply хийж өртөг ханш оруулна уу!</b>', {
-          parse_mode: 'HTML',
-          reply_to_message_id: activeState.txMessageId
-        });
-        return;
-      }
-
       const costRate = parseNumber(text);
       if (costRate <= 0) {
-        await ctx.reply('❌ <b>Зөв тоо оруулна уу!</b>', { parse_mode: 'HTML', reply_to_message_id: messageId });
+        await ctx.reply('❌ Зөв тоо оруулна уу!');
         return;
       }
 
@@ -410,7 +438,6 @@ bot.on('text', async (ctx, next) => {
 
       const rates = await fetchLatestRates();
       await ctx.reply('📊 <b>Зарах ханш сонгоно уу:</b>', {
-        reply_to_message_id: activeState.txMessageId,
         parse_mode: 'HTML',
         ...Markup.inlineKeyboard([
           [
@@ -423,11 +450,10 @@ bot.on('text', async (ctx, next) => {
       return;
     }
 
-    // waiting_custom_rate
     if (activeState.step === 'waiting_custom_rate') {
       const customRate = parseNumber(text);
       if (customRate <= 0) {
-        await ctx.reply('❌ <b>Зөв ханш оруулна уу!</b>', { parse_mode: 'HTML', reply_to_message_id: activeState.txMessageId });
+        await ctx.reply('❌ Зөв ханш оруулна уу!');
         return;
       }
       activeState.rate = customRate;
@@ -436,11 +462,10 @@ bot.on('text', async (ctx, next) => {
       return;
     }
 
-    // waiting_commission
     if (activeState.step === 'waiting_commission') {
       const commission = parseNumber(text);
       if (commission <= 0) {
-        await ctx.reply('❌ <b>Зөв дүн оруулна уу!</b>', { parse_mode: 'HTML', reply_to_message_id: activeState.txMessageId });
+        await ctx.reply('❌ Зөв дүн оруулна уу!');
         return;
       }
       activeState.commission = commission;
@@ -448,13 +473,9 @@ bot.on('text', async (ctx, next) => {
       return;
     }
 
-    // waiting_partial_mnt
     if (activeState.step === 'waiting_partial_mnt') {
       const mnt = parseNumber(text);
-      if (mnt <= 0) {
-        await ctx.reply('❌ <b>Зөв дүн оруулна уу!</b>', { parse_mode: 'HTML', reply_to_message_id: messageId });
-        return;
-      }
+      if (mnt <= 0) return;
 
       activeState.mntReceived = (activeState.mntReceived || 0) + mnt;
       activeState.mntRemaining = activeState.mntTotal - activeState.mntReceived;
@@ -468,15 +489,9 @@ bot.on('text', async (ctx, next) => {
         });
       }
 
-      const calc = formatCalculation(
-        activeState.rub, activeState.commission, activeState.rubTotal,
-        activeState.rate, activeState.mntTotal, activeState.mntReceived
-      );
+      const calc = formatCalculation(activeState.rub, activeState.commission, activeState.rubTotal, activeState.rate, activeState.mntTotal, activeState.mntReceived);
 
-      await ctx.reply(`✅ <b>Хэсэгчлэн орлоо:</b> ${formatNumber(mnt)} MNT\n\n${calc}`, {
-        parse_mode: 'HTML',
-        reply_to_message_id: activeState.txMessageId
-      });
+      await ctx.reply(`✅ <b>Хэсэгчлэн орлоо:</b> ${formatNumber(mnt)} MNT\n\n${calc}`, { parse_mode: 'HTML' });
 
       if (activeState.mntRemaining <= 0) {
         const completedAt = new Date().toISOString();
@@ -484,277 +499,131 @@ bot.on('text', async (ctx, next) => {
 
         if (rowNum) await updateTransaction(rowNum, { completedAt, minutes, status: 'Амжилттай' });
 
-        await ctx.reply('🎉 <b>Гүйлгээ амжилттай хаагдлаа!</b>', {
-          parse_mode: 'HTML',
-          reply_to_message_id: activeState.txMessageId
-        });
-
+        await ctx.reply('🎉 <b>Гүйлгээ амжилттай хаагдлаа!</b>', { parse_mode: 'HTML' });
         transactionStates.delete(`${chatId}_${activeState.txMessageId}`);
       } else {
         activeState.step = 'waiting_confirmation';
         await ctx.reply('💵 <b>MNT бүтэн орсон уу?</b>', {
           parse_mode: 'HTML',
-          reply_to_message_id: activeState.txMessageId,
           ...Markup.inlineKeyboard([
             [Markup.button.callback('✅ Бүтэн орсон', `confirm_full_${activeState.txMessageId}`)],
             [Markup.button.callback('🟠 Дахин хэсэгчлэн орсон', `confirm_partial_${activeState.txMessageId}`)]
           ])
         });
       }
-      return;
     }
   } catch (err) {
-    console.error('❌ Text handler error:', err);
-    return next?.();
+    console.error('❌ Text handler:', err);
   }
 });
 
-// ========== CALLBACK HANDLERS ==========
+// ========== CALLBACKS ==========
 bot.action(/rate_(org|person|custom)_(.+)/, async (ctx) => {
-  try {
-    if (!isUserAllowed(ctx)) return;
+  if (!isUserAllowed(ctx)) return;
 
-    const [, type, txMessageId] = ctx.match;
-    const state = findStateByTxId(ctx.chat.id, txMessageId);
-    if (!state) return;
+  const [, type, txMessageId] = ctx.match;
+  const state = findStateByTxId(ctx.chat.id, txMessageId);
+  if (!state) return;
 
-    const rates = await fetchLatestRates();
+  const rates = await fetchLatestRates();
 
-    if (type === 'org') {
-      state.rate = rates.org;
-      state.rateType = 'Байгууллага';
-      await ctx.answerCbQuery('🏦 Сонгогдлоо');
-      await processCommission(ctx, state);
-      return;
-    }
-
-    if (type === 'person') {
-      state.rate = rates.person;
-      state.rateType = 'Хувь хүн';
-      await ctx.answerCbQuery('👤 Сонгогдлоо');
-      await processCommission(ctx, state);
-      return;
-    }
-
-    // custom
+  if (type === 'org') {
+    state.rate = rates.org;
+    state.rateType = 'Байгууллага';
+    await ctx.answerCbQuery('🏦 Сонгогдлоо');
+    await processCommission(ctx, state);
+  } else if (type === 'person') {
+    state.rate = rates.person;
+    state.rateType = 'Хувь хүн';
+    await ctx.answerCbQuery('👤 Сонгогдлоо');
+    await processCommission(ctx, state);
+  } else {
     state.step = 'waiting_custom_rate';
     await ctx.answerCbQuery();
-    await ctx.reply('✍️ <b>Зарах ханш оруулна уу:</b>', {
-      parse_mode: 'HTML',
-      reply_to_message_id: state.txMessageId
-    });
-  } catch (err) {
-    console.error('❌ Rate callback error:', err);
+    await ctx.reply('✍️ <b>Зарах ханш оруулна уу:</b>', { parse_mode: 'HTML' });
   }
 });
 
 bot.action(/change_commission_(.+)/, async (ctx) => {
-  try {
-    if (!isUserAllowed(ctx)) return;
+  if (!isUserAllowed(ctx)) return;
+  const state = findStateByTxId(ctx.chat.id, ctx.match[1]);
+  if (!state) return;
 
-    const state = findStateByTxId(ctx.chat.id, ctx.match[1]);
-    if (!state) return;
-
-    state.step = 'waiting_commission';
-    await ctx.answerCbQuery();
-    await ctx.reply('💰 <b>Шимтгэл оруулна уу:</b>', {
-      parse_mode: 'HTML',
-      reply_to_message_id: state.calcMessageId || state.txMessageId
-    });
-  } catch (err) {
-    console.error('❌ Change commission error:', err);
-  }
+  state.step = 'waiting_commission';
+  await ctx.answerCbQuery();
+  await ctx.reply('💰 <b>Шимтгэл оруулна уу:</b>', { parse_mode: 'HTML' });
 });
 
 bot.action(/change_rate_(.+)/, async (ctx) => {
-  try {
-    if (!isUserAllowed(ctx)) return;
+  if (!isUserAllowed(ctx)) return;
+  const state = findStateByTxId(ctx.chat.id, ctx.match[1]);
+  if (!state) return;
 
-    const state = findStateByTxId(ctx.chat.id, ctx.match[1]);
-    if (!state) return;
-
-    const rates = await fetchLatestRates();
-    await ctx.answerCbQuery();
-
-    await ctx.editMessageReplyMarkup({
-      inline_keyboard: [
-        [
-          { text: `🏦 ${rates.org.toFixed(2)}`, callback_data: `rate_org_${ctx.match[1]}` },
-          { text: `👤 ${rates.person.toFixed(2)}`, callback_data: `rate_person_${ctx.match[1]}` }
-        ],
-        [{ text: '✍️ Өөр ханш оруулах', callback_data: `rate_custom_${ctx.match[1]}` }]
-      ]
-    });
-  } catch (err) {
-    console.error('❌ Change rate error:', err);
-  }
+  const rates = await fetchLatestRates();
+  await ctx.answerCbQuery();
+  await ctx.editMessageReplyMarkup({
+    inline_keyboard: [
+      [
+        { text: `🏦 ${rates.org.toFixed(2)}`, callback_data: `rate_org_${ctx.match[1]}` },
+        { text: `👤 ${rates.person.toFixed(2)}`, callback_data: `rate_person_${ctx.match[1]}` }
+      ],
+      [{ text: '✍️ Өөр ханш оруулах', callback_data: `rate_custom_${ctx.match[1]}` }]
+    ]
+  });
 });
 
 bot.action(/confirm_transaction_(.+)/, async (ctx) => {
-  try {
-    if (!isUserAllowed(ctx)) return;
+  if (!isUserAllowed(ctx)) return;
+  const state = findStateByTxId(ctx.chat.id, ctx.match[1]);
+  if (!state) return;
 
-    const state = findStateByTxId(ctx.chat.id, ctx.match[1]);
-    if (!state) return;
+  await ctx.answerCbQuery();
 
-    await ctx.answerCbQuery();
-
-    const rowNum = await findTransactionRow(state.txMessageId, ctx.chat.id);
-    if (!rowNum) {
-      await appendTransaction({
-        number: state.number,
-        date: new Date().toISOString(),
-        назначение: state.назначение,
-        rub: state.rub,
-        rate: state.rate,
-        commission: state.commission,
-        rubTotal: state.rubTotal,
-        mntTotal: state.mntTotal,
-        mntReceived: 0,
-        mntRemaining: state.mntTotal,
-        status: 'Хүлээгдэж буй',
-        startedAt: state.startedAt,
-        chatId: state.chatId,
-        txMessageId: state.txMessageId,
-        calcMessageId: state.calcMessageId,
-        rateType: state.rateType,
-        costRate: state.costRate
-      });
-    }
-
-    state.step = 'waiting_confirmation';
-    await ctx.reply('💵 <b>MNT бүтэн орсон уу?</b>', {
-      parse_mode: 'HTML',
-      ...Markup.inlineKeyboard([
-        [Markup.button.callback('✅ Бүтэн орсон', `confirm_full_${ctx.match[1]}`)],
-        [Markup.button.callback('🟠 Хэсэгчлэн орсон', `confirm_partial_${ctx.match[1]}`)]
-      ])
+  const rowNum = await findTransactionRow(state.txMessageId, ctx.chat.id);
+  if (!rowNum) {
+    await appendTransaction({
+      number: state.number, date: new Date().toISOString(), назначение: state.назначение,
+      rub: state.rub, rate: state.rate, commission: state.commission, rubTotal: state.rubTotal,
+      mntTotal: state.mntTotal, mntReceived: 0, mntRemaining: state.mntTotal,
+      status: 'Хүлээгдэж буй', startedAt: state.startedAt, chatId: state.chatId,
+      txMessageId: state.txMessageId, calcMessageId: state.calcMessageId,
+      rateType: state.rateType, costRate: state.costRate
     });
-  } catch (err) {
-    console.error('❌ Confirm transaction error:', err);
   }
+
+  state.step = 'waiting_confirmation';
+  await ctx.reply('💵 <b>MNT бүтэн орсон уу?</b>', {
+    parse_mode: 'HTML',
+    ...Markup.inlineKeyboard([
+      [Markup.button.callback('✅ Бүтэн орсон', `confirm_full_${ctx.match[1]}`)],
+      [Markup.button.callback('🟠 Хэсэгчлэн орсон', `confirm_partial_${ctx.match[1]}`)]
+    ])
+  });
 });
 
 bot.action(/confirm_full_(.+)/, async (ctx) => {
-  try {
-    if (!isUserAllowed(ctx)) return;
+  if (!isUserAllowed(ctx)) return;
+  const state = findStateByTxId(ctx.chat.id, ctx.match[1]);
+  if (!state) return;
 
-    const state = findStateByTxId(ctx.chat.id, ctx.match[1]);
-    if (!state) return;
+  await ctx.answerCbQuery('✅ Амжилттай');
 
-    await ctx.answerCbQuery('✅ Амжилттай');
+  const completedAt = new Date().toISOString();
+  const minutes = Math.round((new Date(completedAt) - new Date(state.startedAt)) / 60000);
 
-    state.mntReceived = state.mntTotal;
-    state.mntRemaining = 0;
-
-    const completedAt = new Date().toISOString();
-    const minutes = Math.round((new Date(completedAt) - new Date(state.startedAt)) / 60000);
-
-    const rowNum = await findTransactionRow(ctx.match[1], ctx.chat.id);
-    if (rowNum) {
-      await updateTransaction(rowNum, {
-        mntReceived: state.mntTotal,
-        mntRemaining: 0,
-        status: 'Амжилттай',
-        completedAt,
-        minutes
-      });
-    }
-
-    await ctx.editMessageText('🎉 <b>Гүйлгээ амжилттай хаагдлаа!</b>', { parse_mode: 'HTML' });
-    transactionStates.delete(`${ctx.chat.id}_${ctx.match[1]}`);
-  } catch (err) {
-    console.error('❌ Confirm full error:', err);
+  const rowNum = await findTransactionRow(ctx.match[1], ctx.chat.id);
+  if (rowNum) {
+    await updateTransaction(rowNum, {
+      mntReceived: state.mntTotal, mntRemaining: 0,
+      status: 'Амжилттай', completedAt, minutes
+    });
   }
+
+  await ctx.editMessageText('🎉 <b>Гүйлгээ амжилттай хаагдлаа!</b>', { parse_mode: 'HTML' });
+  transactionStates.delete(`${ctx.chat.id}_${ctx.match[1]}`);
 });
 
 bot.action(/confirm_partial_(.+)/, async (ctx) => {
-  try {
-    if (!isUserAllowed(ctx)) return;
-
-    const state = findStateByTxId(ctx.chat.id, ctx.match[1]);
-    if (!state) return;
-
-    await ctx.answerCbQuery();
-    state.step = 'waiting_partial_mnt';
-    await ctx.reply('💸 <b>Ороод ирсэн MNT дүнг оруулна уу:</b>', {
-      parse_mode: 'HTML',
-      reply_to_message_id: state.calcMessageId || state.txMessageId
-    });
-  } catch (err) {
-    console.error('❌ Confirm partial error:', err);
-  }
-});
-
-// ========== REPORT ==========
-bot.command('report', async (ctx) => {
   if (!isUserAllowed(ctx)) return;
-
-  try {
-    const transactions = await getTodayTransactions();
-    const completed = transactions.filter(t => t.status === 'Амжилттай');
-    const pending = transactions.filter(t => t.status !== 'Амжилттай');
-
-    let report = '📊 <b>ӨНӨӨДРИЙН ТАЙЛАН</b>\n\n';
-
-    if (completed.length > 0) {
-      const totalRub = completed.reduce((s, t) => s + t.rub, 0);
-      const totalMnt = completed.reduce((s, t) => s + t.mntTotal, 0);
-      const totalProfit = completed.reduce((s, t) => s + (t.rate - t.costRate) * t.rub, 0);
-
-      report += '✅ <b>MNT бүтэн орсон:</b>\n';
-      report += `   Тоо: ${completed.length}\n`;
-      report += `   Нийт RUB: ${formatNumber(totalRub)}\n`;
-      report += `   Нийт MNT: ${formatNumber(totalMnt)}\n`;
-      report += `   Нийт ашиг: ${formatNumber(totalProfit)} MNT\n\n`;
-    }
-
-    if (pending.length > 0) {
-      report += '🟠 <b>MNT дутуу орсон:</b>\n<pre>';
-      let totalRemaining = 0;
-      pending.forEach(t => {
-        report += `${t.number}. ${String(t.назначение || '').substring(0, 20)}... - ${formatNumber(t.mntRemaining)}\n`;
-        totalRemaining += t.mntRemaining;
-      });
-      report += `</pre>\n   Нийт хүлээгдэж буй: ${formatNumber(totalRemaining)} MNT\n`;
-    }
-
-    if (!completed.length && !pending.length) report += 'Өнөөдөр гүйлгээ байхгүй байна.';
-
-    await ctx.reply(report, { parse_mode: 'HTML' });
-  } catch (err) {
-    console.error('❌ Report error:', err);
-    await ctx.reply('❌ Тайлан гаргахад алдаа гарлаа.');
-  }
-});
-
-// ========== WEBHOOK SERVER (Render) ==========
-const app = express();
-app.use(express.json());
-
-app.get('/', (req, res) => res.status(200).send('OYUNS Bot is running!'));
-app.get('/health', (req, res) => res.status(200).send('OK'));
-
-const webhookPath = `/telegraf/${CONFIG.BOT_TOKEN}`;
-app.post(webhookPath, (req, res) => bot.handleUpdate(req.body, res));
-
-async function start() {
-  const webhookUrl = `${CONFIG.WEBHOOK_DOMAIN}${webhookPath}`;
-
-  await bot.telegram.setWebhook(webhookUrl, {
-    drop_pending_updates: true,
-    allowed_updates: ['message', 'callback_query', 'channel_post']
-  });
-
-  app.listen(CONFIG.PORT, () => {
-    console.log(`✅ Webhook server: port ${CONFIG.PORT}`);
-    console.log(`✅ Webhook set: ${webhookUrl}`);
-    console.log(`✅ Allowed Group: ${CONFIG.ALLOWED_GROUP_ID}`);
-    console.log(`✅ Admin IDs: ${CONFIG.ADMIN_IDS.join(', ')}`);
-  });
-}
-
-start().catch((err) => {
-  console.error('❌ Start error:', err);
-  process.exit(1);
-});
+  const state = findStateByTxId(ctx.chat.id, ctx.match[1]);
+  if (!state)
