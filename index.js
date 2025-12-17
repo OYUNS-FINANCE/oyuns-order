@@ -601,29 +601,64 @@ bot.action(/confirm_transaction_(.+)/, async (ctx) => {
   });
 });
 
-bot.action(/confirm_full_(.+)/, async (ctx) => {
-  if (!isUserAllowed(ctx)) return;
-  const state = findStateByTxId(ctx.chat.id, ctx.match[1]);
-  if (!state) return;
+bot.action(/confirm_partial_(.+)/, async (ctx) => {
+  try {
+    if (!isUserAllowed(ctx)) return;
 
-  await ctx.answerCbQuery('✅ Амжилттай');
+    const state = findStateByTxId(ctx.chat.id, ctx.match[1]);
+    if (!state) return;
 
-  const completedAt = new Date().toISOString();
-  const minutes = Math.round((new Date(completedAt) - new Date(state.startedAt)) / 60000);
+    await ctx.answerCbQuery();
+    state.step = 'waiting_partial_mnt';
 
-  const rowNum = await findTransactionRow(ctx.match[1], ctx.chat.id);
-  if (rowNum) {
-    await updateTransaction(rowNum, {
-      mntReceived: state.mntTotal, mntRemaining: 0,
-      status: 'Амжилттай', completedAt, minutes
+    await ctx.reply('💸 <b>Ороод ирсэн MNT дүнг оруулна уу:</b>', {
+      parse_mode: 'HTML',
+      reply_to_message_id: state.calcMessageId || state.txMessageId
     });
+  } catch (err) {
+    console.error('❌ confirm_partial error:', err);
   }
-
-  await ctx.editMessageText('🎉 <b>Гүйлгээ амжилттай хаагдлаа!</b>', { parse_mode: 'HTML' });
-  transactionStates.delete(`${ctx.chat.id}_${ctx.match[1]}`);
 });
 
-bot.action(/confirm_partial_(.+)/, async (ctx) => {
-  if (!isUserAllowed(ctx)) return;
-  const state = findStateByTxId(ctx.chat.id, ctx.match[1]);
-  if (!state)
+// ========== WEBHOOK SERVER (Render) / POLLING FALLBACK ==========
+const app = express();
+app.use(express.json());
+
+app.get('/', (req, res) => res.status(200).send('OYUNS Bot is running!'));
+app.get('/health', (req, res) => res.status(200).send('OK'));
+
+const webhookPath = `/telegraf/${CONFIG.BOT_TOKEN}`;
+app.post(webhookPath, (req, res) => bot.handleUpdate(req.body, res));
+
+async function start() {
+  // Always start HTTP server (Render health checks etc.)
+  app.listen(CONFIG.PORT, () => {
+    console.log(`✅ Server listening on port ${CONFIG.PORT}`);
+  });
+
+  // If WEBHOOK_DOMAIN exists → use webhook; else use polling
+  if (CONFIG.WEBHOOK_DOMAIN) {
+    const webhookUrl = `${CONFIG.WEBHOOK_DOMAIN}${webhookPath}`;
+
+    await bot.telegram.setWebhook(webhookUrl, {
+      drop_pending_updates: true,
+      allowed_updates: ['message', 'callback_query', 'channel_post']
+    });
+
+    console.log(`✅ Webhook set: ${webhookUrl}`);
+  } else {
+    console.log('ℹ️ WEBHOOK_DOMAIN байхгүй тул polling mode асаалаа.');
+    await bot.telegram.deleteWebhook({ drop_pending_updates: true }).catch(() => {});
+    bot.launch();
+    console.log('✅ Bot launched (polling)');
+  }
+}
+
+start().catch((err) => {
+  console.error('❌ Start error:', err);
+  process.exit(1);
+});
+
+// Graceful stop
+process.once('SIGINT', () => bot.stop('SIGINT'));
+process.once('SIGTERM', () => bot.stop('SIGTERM'));
