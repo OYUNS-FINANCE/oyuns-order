@@ -1,3 +1,4 @@
+```js
 'use strict';
 
 const express = require('express');
@@ -99,10 +100,23 @@ function findStateByTxId(chatId, txMessageId) {
 }
 
 function findActiveState(chatId) {
+  // latest started tx in this chat (no-reply UX)
+  let latest = null;
+
   for (const [key, state] of transactionStates.entries()) {
-    if (key.startsWith(`${chatId}_`)) return state;
+    if (!key.startsWith(`${chatId}_`)) continue;
+
+    if (!latest) {
+      latest = state;
+      continue;
+    }
+
+    const a = Number(latest.txMessageId || 0);
+    const b = Number(state.txMessageId || 0);
+    if (b > a) latest = state;
   }
-  return null;
+
+  return latest;
 }
 
 function splitIntoChunks(text, maxLen = 4000) {
@@ -122,7 +136,7 @@ function splitIntoChunks(text, maxLen = 4000) {
   return chunks;
 }
 
-// Europe/Amsterdam date: safest without timezone libs
+// Europe/Amsterdam date
 const REPORT_TZ = 'Europe/Amsterdam';
 function getLocalYMD(date = new Date()) {
   const parts = new Intl.DateTimeFormat('en-CA', {
@@ -281,7 +295,7 @@ async function processCommission(ctx, state) {
     state.step = 'waiting_commission';
     await ctx.reply(
       `💰 <b>Шимтгэл хэд вэ?</b>\n(Санал: ${formatNumber(defaultCommission)} RUB)`,
-      { parse_mode: 'HTML', reply_to_message_id: state.txMessageId }
+      { parse_mode: 'HTML' }
     );
   } else {
     state.commission = defaultCommission;
@@ -339,8 +353,8 @@ async function handleCaptionTransaction(ctx, caption) {
     });
 
     await ctx.reply(
-      '💰 <b>Өртөг ханш оруулна уу:</b>\n<i>👆 Энэ зураг/файл мессежид reply хийж бичнэ үү</i>',
-      { reply_to_message_id: messageId, parse_mode: 'HTML' }
+      '💰 <b>Өртөг ханш оруулна уу:</b>\n<i>reply хийхгүй шууд тоо бичиж болно</i>',
+      { parse_mode: 'HTML' }
     );
   }
 }
@@ -374,7 +388,7 @@ bot.start(async (ctx) => {
 
 📌 Дараалал:
 1) Дээрх форматаар явуулна
-2) Бот “Өртөг ханш” асууна — тухайн мессежид *reply* хийгээд тоогоо бичнэ
+2) Бот “Өртөг ханш” асууна — reply хийхгүй шууд тоо бичиж болно
 3) Дараа нь “Зарах ханш”-аа сонгоно (🏦/👤 эсвэл өөрөө бичиж болно)
 4) Бот тооцоо гаргаад баталгаажуулна
 
@@ -466,6 +480,7 @@ bot.command('report', async (ctx) => {
       let idx = 1;
       for (const t of pending) {
         report += `${idx}) <b>Назначение:</b> ${t.назначение}\n\n`;
+
         const calc = formatCalculation(t.rub, t.commission, t.rubTotal, t.rate, t.mntTotal, t.mntReceived);
         report += `<b>Тооцоо:</b>\n\n${calc}\n\n`;
         report += `<b>Үлдэгдэл:</b> ${formatNumber(t.mntRemaining, 2)}\n\n`;
@@ -493,7 +508,7 @@ bot.on('text', async (ctx, next) => {
   try {
     const text = ctx.message?.text || '';
 
-    // let bot.command handlers run
+    // commands -> next()
     if (text.startsWith('/')) return next();
 
     if (!isUserAllowed(ctx)) return;
@@ -501,7 +516,7 @@ bot.on('text', async (ctx, next) => {
     const chatId = ctx.chat.id;
     const messageId = ctx.message.message_id;
 
-    // 1) NEW TX detect
+    // 1) NEW TX detect (text)
     const numberMatch = text.match(/^(\d+)\./m);
     const назначениеMatch = text.match(/назначени[её][^:]*:\s*(.+)/im);
     const суммаMatch = text.match(/сумма:\s*([\d,.\s]+)/im);
@@ -518,14 +533,13 @@ bot.on('text', async (ctx, next) => {
         startedAt: new Date().toISOString()
       });
 
-      await ctx.reply('💰 <b>Өртөг ханш оруулна уу:</b>\n<i>👆 Энэ мессежид reply хийж бичнэ үү</i>', {
-        reply_to_message_id: messageId,
+      await ctx.reply('💰 <b>Өртөг ханш оруулна уу:</b>\n<i>reply хийхгүй шууд тоо бичиж болно</i>', {
         parse_mode: 'HTML'
       });
       return;
     }
 
-    // 2) Find state (prefer reply -> correct tx)
+    // 2) Find active state (prefer reply if exists, else latest)
     let activeState = null;
     if (ctx.message.reply_to_message) {
       activeState = findStateByTxId(chatId, ctx.message.reply_to_message.message_id);
@@ -533,19 +547,11 @@ bot.on('text', async (ctx, next) => {
     if (!activeState) activeState = findActiveState(chatId);
     if (!activeState) return;
 
-    // waiting_cost_rate (require reply to original tx message)
+    // waiting_cost_rate (NO reply required)
     if (activeState.step === 'waiting_cost_rate') {
-      if (!ctx.message.reply_to_message || String(ctx.message.reply_to_message.message_id) !== String(activeState.txMessageId)) {
-        await ctx.reply('⚠️ <b>Гүйлгээний мессежид reply хийж өртөг ханш оруулна уу!</b>', {
-          parse_mode: 'HTML',
-          reply_to_message_id: activeState.txMessageId
-        });
-        return;
-      }
-
       const costRate = parseNumber(text);
       if (costRate <= 0) {
-        await ctx.reply('❌ <b>Зөв тоо оруулна уу!</b>', { parse_mode: 'HTML', reply_to_message_id: activeState.txMessageId });
+        await ctx.reply('❌ <b>Өртөг ханш зөв тоо оруулна уу!</b>', { parse_mode: 'HTML' });
         return;
       }
 
@@ -554,7 +560,6 @@ bot.on('text', async (ctx, next) => {
 
       const rates = await fetchLatestRates();
       await ctx.reply('📊 <b>Зарах ханш сонгоно уу:</b>', {
-        reply_to_message_id: activeState.txMessageId,
         parse_mode: 'HTML',
         ...Markup.inlineKeyboard([
           [
@@ -571,7 +576,7 @@ bot.on('text', async (ctx, next) => {
     if (activeState.step === 'waiting_custom_rate') {
       const customRate = parseNumber(text);
       if (customRate <= 0) {
-        await ctx.reply('❌ <b>Зөв ханш оруулна уу!</b>', { parse_mode: 'HTML', reply_to_message_id: activeState.txMessageId });
+        await ctx.reply('❌ <b>Зөв ханш оруулна уу!</b>', { parse_mode: 'HTML' });
         return;
       }
       activeState.rate = customRate;
@@ -584,7 +589,7 @@ bot.on('text', async (ctx, next) => {
     if (activeState.step === 'waiting_commission') {
       const commission = parseNumber(text);
       if (commission <= 0) {
-        await ctx.reply('❌ <b>Зөв дүн оруулна уу!</b>', { parse_mode: 'HTML', reply_to_message_id: activeState.txMessageId });
+        await ctx.reply('❌ <b>Зөв дүн оруулна уу!</b>', { parse_mode: 'HTML' });
         return;
       }
       activeState.commission = commission;
@@ -596,7 +601,7 @@ bot.on('text', async (ctx, next) => {
     if (activeState.step === 'waiting_partial_mnt') {
       const mnt = parseNumber(text);
       if (mnt <= 0) {
-        await ctx.reply('❌ <b>Зөв дүн оруулна уу!</b>', { parse_mode: 'HTML', reply_to_message_id: activeState.txMessageId });
+        await ctx.reply('❌ <b>Зөв дүн оруулна уу!</b>', { parse_mode: 'HTML' });
         return;
       }
 
@@ -618,8 +623,7 @@ bot.on('text', async (ctx, next) => {
       );
 
       await ctx.reply(`✅ <b>Хэсэгчлэн орлоо:</b> ${formatNumber(mnt)} MNT\n\n${calc}`, {
-        parse_mode: 'HTML',
-        reply_to_message_id: activeState.txMessageId
+        parse_mode: 'HTML'
       });
 
       if (activeState.mntRemaining <= 0) {
@@ -628,17 +632,12 @@ bot.on('text', async (ctx, next) => {
 
         if (rowNum) await updateTransaction(rowNum, { completedAt, minutes, status: 'Амжилттай' });
 
-        await ctx.reply('🎉 <b>Гүйлгээ амжилттай хаагдлаа!</b>', {
-          parse_mode: 'HTML',
-          reply_to_message_id: activeState.txMessageId
-        });
-
+        await ctx.reply('🎉 <b>Гүйлгээ амжилттай хаагдлаа!</b>', { parse_mode: 'HTML' });
         transactionStates.delete(`${chatId}_${activeState.txMessageId}`);
       } else {
         activeState.step = 'waiting_confirmation';
         await ctx.reply('💵 <b>MNT бүтэн орсон уу?</b>', {
           parse_mode: 'HTML',
-          reply_to_message_id: activeState.txMessageId,
           ...Markup.inlineKeyboard([
             [Markup.button.callback('✅ Бүтэн орсон', `confirm_full_${activeState.txMessageId}`)],
             [Markup.button.callback('🟠 Дахин хэсэгчлэн орсон', `confirm_partial_${activeState.txMessageId}`)]
@@ -683,8 +682,7 @@ bot.action(/rate_(org|person|custom)_(.+)/, async (ctx) => {
     state.step = 'waiting_custom_rate';
     await ctx.answerCbQuery();
     await ctx.reply('✍️ <b>Зарах ханш оруулна уу:</b>', {
-      parse_mode: 'HTML',
-      reply_to_message_id: state.txMessageId
+      parse_mode: 'HTML'
     });
   } catch (err) {
     console.error('❌ rate callback error:', err);
@@ -701,8 +699,7 @@ bot.action(/change_commission_(.+)/, async (ctx) => {
     state.step = 'waiting_commission';
     await ctx.answerCbQuery();
     await ctx.reply('💰 <b>Шимтгэл оруулна уу:</b>', {
-      parse_mode: 'HTML',
-      reply_to_message_id: state.calcMessageId || state.txMessageId
+      parse_mode: 'HTML'
     });
   } catch (err) {
     console.error('❌ change_commission error:', err);
@@ -768,7 +765,6 @@ bot.action(/confirm_transaction_(.+)/, async (ctx) => {
     state.step = 'waiting_confirmation';
     await ctx.reply('💵 <b>MNT бүтэн орсон уу?</b>', {
       parse_mode: 'HTML',
-      reply_to_message_id: state.txMessageId,
       ...Markup.inlineKeyboard([
         [Markup.button.callback('✅ Бүтэн орсон', `confirm_full_${ctx.match[1]}`)],
         [Markup.button.callback('🟠 Хэсэгчлэн орсон', `confirm_partial_${ctx.match[1]}`)]
@@ -822,9 +818,8 @@ bot.action(/confirm_partial_(.+)/, async (ctx) => {
     await ctx.answerCbQuery();
     state.step = 'waiting_partial_mnt';
 
-    await ctx.reply('💸 <b>Ороод ирсэн MNT дүнг оруулна уу:</b>', {
-      parse_mode: 'HTML',
-      reply_to_message_id: state.calcMessageId || state.txMessageId
+    await ctx.reply('💸 <b>Хүлээн авсан MNT дүнг оруулна уу:</b>', {
+      parse_mode: 'HTML'
     });
   } catch (err) {
     console.error('❌ confirm_partial error:', err);
@@ -868,3 +863,4 @@ start().catch((err) => {
 
 process.once('SIGINT', () => bot.stop('SIGINT'));
 process.once('SIGTERM', () => bot.stop('SIGTERM'));
+```
