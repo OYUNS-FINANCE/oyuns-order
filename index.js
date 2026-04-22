@@ -14,6 +14,7 @@ const ALLOWED_CHAT_IDS = [
 const BOT_TOKEN = '8108084322:AAEfmQq8uxTlE0L9t3SOQOlIIzQmZ8JwAdI';
 const SPREADSHEET_ID = '1qbxJsI4Ns3a8lluxlRZl5r5AKHA3hp9yS7YZLwY469A';
 const SHEET_NAME = 'Transactions';
+const SWIFT_SHEET_NAME = 'SWIFT';
 
 // === GOOGLE SHEETS AUTH ===
 const credentialsPath = path.resolve('./service-account.json');
@@ -144,13 +145,102 @@ function extractNumber(text) {
   return m && m[1] ? m[1] : '';
 }
 
-// Тайлбар
+// Тайлбар — Назначение / Назначение платежа / Наз гэх мэт хэлбэр таних
 function extractDescription(text) {
-  const m = text.match(/Назначение:\s*([\s\S]*?)Сумма:/i);
+  const m = text.match(/Наз(?:начение(?:\s+платежа)?)?[:\s]+([\s\S]*?)Сумма:/i);
   if (m && m[1]) {
     return 'Назначение: ' + m[1].trim();
   }
   return text;
+}
+
+// "1", "1-3", "1,2,3", "3-6,8,9" → тоонуудын жагсаалт
+function parseNumberList(str) {
+  const numbers = new Set();
+  for (const seg of str.split(',')) {
+    const trimmed = seg.trim();
+    const parts = trimmed.split('-');
+    if (parts.length === 2 && parts[0] && parts[1]) {
+      const from = parseInt(parts[0], 10);
+      const to = parseInt(parts[1], 10);
+      if (!isNaN(from) && !isNaN(to)) {
+        for (let i = from; i <= to; i++) numbers.add(i);
+      }
+    } else {
+      const n = parseInt(trimmed, 10);
+      if (!isNaN(n)) numbers.add(n);
+    }
+  }
+  return [...numbers].sort((a, b) => a - b);
+}
+
+// Оригинал мессеж дээр 👍 reaction дарах
+async function reactLike(ctx) {
+  try {
+    await ctx.telegram.callApi('setMessageReaction', {
+      chat_id: ctx.chat.id,
+      message_id: ctx.message.message_id,
+      reaction: [{ type: 'emoji', emoji: '👍' }]
+    });
+  } catch (e) {
+    console.error('Reaction error:', e);
+  }
+}
+
+// === SWIFT ТУСЛАХ ФУНКЦУУД ===
+
+// SWIFT мессеж мөн эсэх
+function isSwiftMessage(text) {
+  return /Amount:/i.test(text) && (
+    /Company name:/i.test(text) ||
+    /Company account:/i.test(text) ||
+    /SWIFT:/i.test(text)
+  );
+}
+
+// Эхний мөрнөөс № авах: "1. ps global" → "1"
+function extractSwiftNumber(text) {
+  const firstLine = text.split('\n').map(l => l.trim()).find(l => l !== '') || '';
+  const m = firstLine.match(/^(\d+)[\.\)]?\s*/);
+  return m ? m[1] : '';
+}
+
+// Эхний мөрнөөс гүйцэтгэгч авах: "1. ps global" → "ps global"
+function extractSwiftExecutor(text) {
+  const firstLine = text.split('\n').map(l => l.trim()).find(l => l !== '') || '';
+  const m = firstLine.match(/^\d+[\.\)]?\s+(.*)/);
+  return m ? m[1].trim() : '';
+}
+
+// Amount болон валют parse хийх
+// Дэмжих форматууд: 21.000.000 jpy / 21,000,000 jpy / 1100 CNY г.м
+function extractSwiftAmountAndCurrency(text) {
+  const m = text.match(/Amount:\s*([\d\s,\.]+)\s+([a-zA-Z]+)/i);
+  if (!m) return { amount: '', currency: '' };
+
+  let amountStr = m[1].trim();
+  const currency = m[2].trim().toUpperCase();
+
+  // Бүх цэг, таслал, зайг хасна (бүгдийг мянгын тусгаарлагч гэж үзнэ)
+  amountStr = amountStr.replace(/[\s,\.]/g, '');
+  const num = parseFloat(amountStr);
+
+  return { amount: isNaN(num) ? '' : num, currency };
+}
+
+// SWIFT мөр нэмэх
+async function appendSwiftRow(number, fullText, executor, amount, currency) {
+  return await sheetsLock.withLock(async () => {
+    await sheets.spreadsheets.values.append({
+      spreadsheetId: SPREADSHEET_ID,
+      range: `${SWIFT_SHEET_NAME}!A:H`,
+      valueInputOption: 'USER_ENTERED',
+      requestBody: {
+        values: [[number, fullText, executor, amount, currency, '', '', '']]
+      }
+    });
+    invalidateCache();
+  });
 }
 
 // Зарлагын дүн
@@ -194,56 +284,31 @@ function invalidateCache() {
 }
 
 // Мөр нэмэх - LOCK-ТЭЙГЭЭР
-async function appendTransactionRow(date, number, description, amount, status = 'Хүлээгдэж буй') {
+async function appendTransactionRow(date, number, description, amount) {
   return await sheetsLock.withLock(async () => {
     const timestamp = new Date().toISOString();
 
-    const res = await sheets.spreadsheets.values.append({
+    await sheets.spreadsheets.values.append({
       spreadsheetId: SPREADSHEET_ID,
       range: `${SHEET_NAME}!A:G`,
       valueInputOption: 'USER_ENTERED',
       requestBody: {
-        values: [[number, date, description, amount, '', timestamp, status]]
+        values: [[number, date, description, amount, '', timestamp, '']]
       }
     });
 
     invalidateCache();
-
-    let rowIndex = null;
-    const updates = res.data && res.data.updates;
-    if (updates && updates.updatedRange) {
-      const m = updates.updatedRange.match(/![A-Z]+(\d+):/);
-      if (m && m[1]) {
-        rowIndex = parseInt(m[1], 10);
-      }
-    }
-
-    // Fallback: updatedRange байхгүй бол A баганын уртаар тооцно
-    if (!rowIndex) {
-      try {
-        const rowsRes = await sheets.spreadsheets.values.get({
-          spreadsheetId: SPREADSHEET_ID,
-          range: `${SHEET_NAME}!A:A`
-        });
-        const rows = rowsRes.data.values || [];
-        rowIndex = rows.length;
-        console.log(`⚠️ Fallback: rowIndex = ${rowIndex}`);
-      } catch (err) {
-        console.error('Error in fallback rowIndex calculation:', err);
-      }
-    }
-
-    return rowIndex;
   });
 }
 
-// Огноо + № range-тай өртөг ханш шинэчлэх
-async function updateRateForDate(date, rate, fromNo = null, toNo = null) {
+// Огноо + дугаарын жагсаалтаар өртөг ханш шинэчлэх
+async function updateRateForDate(date, rate, numberList = null) {
   return await sheetsLock.withLock(async () => {
     const rows = await getAllRows(false); // fresh data
     if (rows.length < 2) return 0;
 
     const updates = [];
+    const numberSet = numberList ? new Set(numberList) : null;
 
     for (let i = 1; i < rows.length; i++) {
       const row = rows[i];
@@ -253,12 +318,9 @@ async function updateRateForDate(date, rate, fromNo = null, toNo = null) {
       if (rowDate !== date) continue;
       if (currentRate && currentRate !== '') continue; // зөвхөн хоосон E
 
-      // Хэрэв № range заасан бол шалгана
-      if (fromNo !== null && toNo !== null) {
-        const noStr = row[0];
-        const no = parseInt(noStr, 10);
-        if (isNaN(no)) continue;
-        if (no < fromNo || no > toNo) continue;
+      if (numberSet !== null) {
+        const no = parseInt(row[0], 10);
+        if (isNaN(no) || !numberSet.has(no)) continue;
       }
 
       const rowIndex = i + 1;
@@ -280,24 +342,6 @@ async function updateRateForDate(date, rate, fromNo = null, toNo = null) {
 
     invalidateCache();
     return updates.length;
-  });
-}
-
-// Статус бичих
-async function updateStatus(rowIndex, statusText) {
-  if (!rowIndex) return;
-
-  return await sheetsLock.withLock(async () => {
-    await sheets.spreadsheets.values.update({
-      spreadsheetId: SPREADSHEET_ID,
-      range: `${SHEET_NAME}!G${rowIndex}`,
-      valueInputOption: 'USER_ENTERED',
-      requestBody: {
-        values: [[statusText]]
-      }
-    });
-
-    invalidateCache();
   });
 }
 
@@ -525,14 +569,25 @@ async function processMessage(ctx, text) {
     if (dateMatch) {
       const datePart = dateMatch[1].replace(/-/g, '.');
       chatState.setDate(chatId, datePart);
-      await ctx.reply(`Огноо тогтоож авлаа: ${datePart}`);
+      await reactLike(ctx);
       return true;
     }
 
     const currentDate = chatState.getDate(chatId);
 
-    // 2) ГҮЙЛГЭЭ МЕССЕЖ ҮҮ?
-    const hasPurpose = /Назначение:/i.test(text);
+    // 2) SWIFT МЕССЕЖ ҮҮ?
+    if (isSwiftMessage(text)) {
+      const number = extractSwiftNumber(text);
+      const executor = extractSwiftExecutor(text);
+      const { amount, currency } = extractSwiftAmountAndCurrency(text);
+
+      await appendSwiftRow(number, text, executor, amount, currency);
+      await reactLike(ctx);
+      return true;
+    }
+
+    // 3) ГҮЙЛГЭЭ (НАЗНАЧЕНИЕ) МЕССЕЖ ҮҮ?
+    const hasPurpose = /Наз(?:начение(?:\s+платежа)?)?[\s:]/i.test(text);
     const hasAmount = /Сумма:/i.test(text);
 
     if (hasPurpose && hasAmount) {
@@ -545,61 +600,44 @@ async function processMessage(ctx, text) {
       const description = extractDescription(text);
       const amount = extractAmountForExpense(text);
 
-      const rowIndex = await appendTransactionRow(currentDate, number, description, amount);
+      await appendTransactionRow(currentDate, number, description, amount);
 
-      await ctx.reply(`Гүйлгээг бүртгэлээ.\n\n${text}`, {
-        reply_markup: {
-          inline_keyboard: [
-            [
-              { text: '✅', callback_data: `status:SUCCESS:${rowIndex}` },
-              { text: '❌', callback_data: `status:CANCELED:${rowIndex}` }
-            ]
-          ]
-        }
-      });
+      await reactLike(ctx);
       return true;
     }
 
-    // 3) ӨРТӨГ ХАНШ МЕССЕЖ ҮҮ?
+    // 4) ӨРТӨГ ХАНШ МЕССЕЖ ҮҮ?
     if (text.startsWith('Өртөг ханш')) {
       if (!currentDate) {
         await ctx.reply('Эхлээд огноо оруулна уу.');
         return true;
       }
 
-      // Эхлээд range + rate (ж: Өртөг ханш: 3-6: 46,10)
-      let fromNo = null;
-      let toNo = null;
+      // Формат: Өртөг ханш [дугаарууд]: [ханш]
+      // Дугаарууд: 1 / 1-3 / 1,2,3 / 3-6,8,9 г.м
+      let numberList = null;
       let rateStr = null;
 
-      const rangeMatch = text.match(/Өртөг ханш[:\s]+(\d+)\s*-\s*(\d+)[:\s]+([\d\.,]+)/i);
+      const rangeMatch = text.match(/Өртөг ханш[:\s]+([\d][\d,\-]*)\s*:\s*([\d\.,]+)/i);
+      const rateOnlyMatch = text.match(/Өртөг ханш[:\s]+([\d\.,]+)/i);
+
       if (rangeMatch) {
-        fromNo = parseInt(rangeMatch[1], 10);
-        toNo = parseInt(rangeMatch[2], 10);
-        rateStr = rangeMatch[3];
-      } else {
-        // Зөвхөн rate (ж: Өртөг ханш: 46,10)
-        const rateOnlyMatch = text.match(/Өртөг ханш[:\s]+([\d\.,]+)/i);
-        if (rateOnlyMatch) {
-          rateStr = rateOnlyMatch[1];
-        }
+        numberList = parseNumberList(rangeMatch[1]);
+        rateStr = rangeMatch[2];
+      } else if (rateOnlyMatch) {
+        rateStr = rateOnlyMatch[1];
       }
 
       if (!rateStr) {
-        await ctx.reply('Зөв формат: Өртөг ханш: 46,40 эсвэл Өртөг ханш: 3-6: 46,40');
+        await ctx.reply('Зөв формат: Өртөг ханш: 46,40 эсвэл Өртөг ханш: 1-3,5: 46,40');
         return true;
       }
 
       rateStr = rateStr.replace(/\s+/g, '').replace(',', '.');
 
-      const updated = await updateRateForDate(currentDate, rateStr, fromNo, toNo);
+      await updateRateForDate(currentDate, rateStr, numberList);
 
-      if (fromNo !== null && toNo !== null) {
-        await ctx.reply(`Өртөг ханш №${fromNo}-${toNo}-д ${rateStr} гэж тохирууллаа (${updated} мөр) ✅`);
-      } else {
-        await ctx.reply(`Өртөг ханш ${rateStr} гэж тохирууллаа (${updated} мөр) ✅`);
-      }
-
+      await reactLike(ctx);
       return true;
     }
 
@@ -632,7 +670,6 @@ bot.on('photo', async (ctx) => {
   try {
     const caption = (ctx.message.caption || '').trim();
     if (!caption) return;
-
     await processMessage(ctx, caption);
   } catch (err) {
     console.error('Error in photo handler:', err);
@@ -644,41 +681,18 @@ bot.on('photo', async (ctx) => {
   }
 });
 
-// === INLINE ТОВЧ (✅ / ❌) ===
-bot.on('callback_query', async (ctx) => {
+// === ФАЙЛТАЙ (DOCUMENT) МЕССЕЖ ===
+bot.on('document', async (ctx) => {
   try {
-    const data = ctx.callbackQuery.data || '';
-    if (!data.startsWith('status:')) {
-      await ctx.answerCbQuery();
-      return;
-    }
-
-    const parts = data.split(':');
-    const statusKey = parts[1];
-    const rowIndex = parseInt(parts[2], 10);
-
-    let statusText;
-    if (statusKey === 'SUCCESS') statusText = 'Амжилттай';
-    else if (statusKey === 'CANCELED') statusText = 'Цуцласан';
-    else statusText = 'Хүлээгдэж буй';
-
-    await updateStatus(rowIndex, statusText);
-
-    await ctx.answerCbQuery(`Статус: ${statusText}`);
-
-    try {
-      await ctx.editMessageReplyMarkup({ inline_keyboard: [] });
-    } catch (e) {}
-
-    try {
-      await ctx.deleteMessage();
-    } catch (e) {}
+    const caption = (ctx.message.caption || '').trim();
+    if (!caption) return;
+    await processMessage(ctx, caption);
   } catch (err) {
-    console.error('Error in callback_query:', err);
+    console.error('Error in document handler:', err);
     try {
-      await ctx.answerCbQuery('Алдаа гарлаа 😢', { show_alert: true });
+      await ctx.reply('Дотоод алдаа гарлаа (document) 😢');
     } catch (e) {
-      console.error('Failed to send callback error:', e);
+      console.error('Failed to send error message:', e);
     }
   }
 });
