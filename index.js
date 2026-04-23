@@ -177,13 +177,9 @@ function parseNumberList(str) {
 // Оригинал мессеж дээр 👍 reaction дарах
 async function reactLike(ctx) {
   try {
-    await ctx.telegram.callApi('setMessageReaction', {
-      chat_id: ctx.chat.id,
-      message_id: ctx.message.message_id,
-      reaction: [{ type: 'emoji', emoji: '👍' }]
-    });
+    await ctx.react('👍');
   } catch (e) {
-    console.error('Reaction error:', e);
+    console.error('Reaction error:', e.message || e);
   }
 }
 
@@ -350,14 +346,43 @@ async function updateRateForDate(date, rate, numberList = null) {
 // /start команд
 bot.start((ctx) => {
   const text =
-    'Сайн уу! 😊\n\n' +
-    'Эхлээд огноо оруулна уу.\n\n' +
-    'Дараа нь гүйлгээ бүрийг ийм хэлбэрээр явуулна:\n\n' +
-    '<i>1.\n' +
-    'Назначение: ...\n' +
-    'Сумма: ... руб</i>\n\n' +
-    'Сүүлд нь:\n' +
-    '<i>Өртөг ханш: ...</i>';
+    '<b>OYUNS BOT — Заавар</b>\n\n' +
+
+    '━━━━━━━━━━━━━━━━━━━\n' +
+    '<b>1. Огноо тохируулах</b>\n' +
+    'Эхлээд өдрийн огноог оруулна уу:\n' +
+    '<code>2025.12.05 FRIDAY</code>\n' +
+    '<i>(Үүнгүйгээр гүйлгээ бүртгэхгүй)</i>\n\n' +
+
+    '━━━━━━━━━━━━━━━━━━━\n' +
+    '<b>2. Ердийн гүйлгээ бүртгэх</b>\n' +
+    '<code>1. Компани нэр\n' +
+    'Наз: Барааны тооцоо\n' +
+    'Сумма: 500000</code>\n' +
+    '<i>→ Transactions sheet-д хадгалагдана</i>\n\n' +
+
+    '━━━━━━━━━━━━━━━━━━━\n' +
+    '<b>3. SWIFT гүйлгээ бүртгэх</b>\n' +
+    '<code>1. PS Global\n' +
+    'Amount: 1,500,000 JPY\n' +
+    'SWIFT: XXXXXXXX\n' +
+    'Company name: Example Ltd</code>\n' +
+    '<i>→ SWIFT sheet-д хадгалагдана</i>\n\n' +
+
+    '━━━━━━━━━━━━━━━━━━━\n' +
+    '<b>4. Өртөг ханш тохируулах</b>\n' +
+    '<code>Өртөг ханш 3.45</code>  — бүгдэд\n' +
+    '<code>Өртөг ханш 1-3: 3.45</code>  — 1-3 мөрд\n' +
+    '<code>Өртөг ханш 1,2,5: 3.45</code>  — сонгосон мөрд\n\n' +
+
+    '━━━━━━━━━━━━━━━━━━━\n' +
+    '<b>5. Тойм харах</b>\n' +
+    '<code>/general</code>  — өнөөдрийн тойм\n' +
+    '<code>/general 2025.12.05</code>  — тухайн өдрийн тойм\n\n' +
+
+    '━━━━━━━━━━━━━━━━━━━\n' +
+    '💡 <i>Амжилттай бүртгэгдсэн үед 👍 реакц өгнө</i>\n' +
+    '💡 <i>Зураг/файлын caption дээр ч мөн ажиллана</i>';
 
   ctx.reply(text, { parse_mode: 'HTML' });
 });
