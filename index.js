@@ -350,6 +350,11 @@ async function updateRateForDate(date, rate, numberList = null) {
 
 // === КОМАНДУУД ===
 
+// /version команд — шинэчлэгдсэн эсэхийг шалгах
+bot.command('version', (ctx) => {
+  ctx.reply('✅ v2.0 — 2026.04.23\nШинэ /start заавар, алдааны дэлгэрэнгүй мэдэгдэл, 👍 reaction засвар.');
+});
+
 // /start команд
 bot.start((ctx) => {
   const text =
