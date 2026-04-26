@@ -11,18 +11,29 @@ const ALLOWED_CHAT_IDS = [
 ];
 
 // === ТОХИРУУЛГА ===
-const BOT_TOKEN = '8108084322:AAEfmQq8uxTlE0L9t3SOQOlIIzQmZ8JwAdI';
-const SPREADSHEET_ID = '1qbxJsI4Ns3a8lluxlRZl5r5AKHA3hp9yS7YZLwY469A';
+const BOT_TOKEN = process.env.BOT_TOKEN || '8108084322:AAEfmQq8uxTlE0L9t3SOQOlIIzQmZ8JwAdI';
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '1qbxJsI4Ns3a8lluxlRZl5r5AKHA3hp9yS7YZLwY469A';
 const SHEET_NAME = 'Transactions';
 const SWIFT_SHEET_NAME = 'SWIFT';
 
 // === GOOGLE SHEETS AUTH ===
-const credentialsPath = path.resolve('./service-account.json');
+// Хэрэв SERVICE_ACCOUNT_JSON environment variable байвал тэрийг ашиглана,
+// үгүй бол service-account.json файлаас уншина
+let authConfig;
+if (process.env.SERVICE_ACCOUNT_JSON) {
+  const credentials = JSON.parse(process.env.SERVICE_ACCOUNT_JSON);
+  authConfig = {
+    credentials,
+    scopes: ['https://www.googleapis.com/auth/spreadsheets']
+  };
+} else {
+  authConfig = {
+    keyFile: path.resolve('./service-account.json'),
+    scopes: ['https://www.googleapis.com/auth/spreadsheets']
+  };
+}
 
-const auth = new google.auth.GoogleAuth({
-  keyFile: credentialsPath,
-  scopes: ['https://www.googleapis.com/auth/spreadsheets']
-});
+const auth = new google.auth.GoogleAuth(authConfig);
 
 const sheets = google.sheets({ version: 'v4', auth });
 
