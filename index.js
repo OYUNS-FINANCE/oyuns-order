@@ -12,10 +12,18 @@ const ALLOWED_CHAT_IDS = [
 ];
 
 // === ТОХИРУУЛГА ===
-const BOT_TOKEN = process.env.BOT_TOKEN || '8108084322:AAEfmQq8uxTlE0L9t3SOQOlIIzQmZ8JwAdI';
+const BOT_TOKEN = process.env.BOT_TOKEN;
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '1qbxJsI4Ns3a8lluxlRZl5r5AKHA3hp9yS7YZLwY469A';
 const SHEET_NAME = 'Transactions';
 const SWIFT_SHEET_NAME = 'SWIFT';
+
+function requireEnv(name, value) {
+  if (!value || typeof value !== 'string' || value.trim() === '') {
+    throw new Error(`Missing required environment variable: ${name}`);
+  }
+}
+
+requireEnv('BOT_TOKEN', BOT_TOKEN);
 
 // === GOOGLE SHEETS AUTH ===
 // Хэрэв SERVICE_ACCOUNT_JSON environment variable байвал тэрийг ашиглана,
