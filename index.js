@@ -1,6 +1,7 @@
 const { Telegraf } = require('telegraf');
 const { google } = require('googleapis');
 const path = require('path');
+const fs = require('fs');
 const http = require('http');
 
 // === ЗӨВШӨӨРӨГДСӨН ЧАТУУД (WHITELIST) ===
@@ -19,27 +20,117 @@ const SWIFT_SHEET_NAME = 'SWIFT';
 // === GOOGLE SHEETS AUTH ===
 // Хэрэв SERVICE_ACCOUNT_JSON environment variable байвал тэрийг ашиглана,
 // үгүй бол service-account.json файлаас уншина
+function normalizePrivateKey(key) {
+  if (!key || typeof key !== 'string') return key;
+
+  let normalized = key.trim();
+
+  // Зарим deployment орчинд "\\n" хэлбэрээр хадгалагддаг.
+  normalized = normalized.replace(/\\n/g, '\n').replace(/\r\n/g, '\n');
+
+  if (normalized.startsWith('"') && normalized.endsWith('"')) {
+    normalized = normalized.slice(1, -1);
+  }
+
+  return normalized;
+}
+
+function parseServiceAccountJson(rawValue) {
+  if (!rawValue) return null;
+
+  // 1) Шууд JSON
+  try {
+    return JSON.parse(rawValue);
+  } catch (_) {
+    // ignore
+  }
+
+  // 2) Base64-encoded JSON
+  try {
+    const decoded = Buffer.from(rawValue, 'base64').toString('utf8');
+    return JSON.parse(decoded);
+  } catch (_) {
+    return null;
+  }
+}
+
+function loadServiceAccountCredentials() {
+  const jsonFromEnv = parseServiceAccountJson(process.env.SERVICE_ACCOUNT_JSON);
+  if (jsonFromEnv) {
+    if (jsonFromEnv.private_key) {
+      jsonFromEnv.private_key = normalizePrivateKey(jsonFromEnv.private_key);
+    }
+    return jsonFromEnv;
+  }
+
+  const privateKey = normalizePrivateKey(
+    process.env.SERVICE_ACCOUNT_PRIVATE_KEY || process.env.GOOGLE_PRIVATE_KEY
+  );
+  const clientEmail = process.env.SERVICE_ACCOUNT_CLIENT_EMAIL || process.env.GOOGLE_CLIENT_EMAIL;
+  const projectId = process.env.SERVICE_ACCOUNT_PROJECT_ID || process.env.GOOGLE_PROJECT_ID;
+
+  if (privateKey && clientEmail) {
+    return {
+      type: 'service_account',
+      private_key: privateKey,
+      client_email: clientEmail,
+      project_id: projectId
+    };
+  }
+
+  return null;
+}
+
+function validateServiceAccountCredentials(credentials) {
+  if (!credentials || typeof credentials !== 'object') return false;
+  if (!credentials.client_email || !credentials.private_key) return false;
+
+  const key = credentials.private_key;
+  return (
+    key.includes('BEGIN PRIVATE KEY') &&
+    key.includes('END PRIVATE KEY')
+  );
+}
+
 let authConfig;
-if (process.env.SERVICE_ACCOUNT_JSON) {
-  const credentials = JSON.parse(process.env.SERVICE_ACCOUNT_JSON);
+const loadedCredentials = loadServiceAccountCredentials();
+
+if (validateServiceAccountCredentials(loadedCredentials)) {
   authConfig = {
-    credentials,
+    credentials: loadedCredentials,
     scopes: ['https://www.googleapis.com/auth/spreadsheets']
   };
+  console.log('Google auth mode: SERVICE_ACCOUNT (env)');
 } else {
+  const serviceAccountPath = path.resolve('./service-account.json');
+  if (!fs.existsSync(serviceAccountPath)) {
+    throw new Error(
+      'Google service account not configured. Set SERVICE_ACCOUNT_JSON (or SERVICE_ACCOUNT_PRIVATE_KEY + SERVICE_ACCOUNT_CLIENT_EMAIL) or provide service-account.json'
+    );
+  }
+
   authConfig = {
-    keyFile: path.resolve('./service-account.json'),
+    keyFile: serviceAccountPath,
     scopes: ['https://www.googleapis.com/auth/spreadsheets']
   };
+  console.log('Google auth mode: service-account.json');
 }
 
 const auth = new google.auth.GoogleAuth(authConfig);
 
 const sheets = google.sheets({ version: 'v4', auth });
 
-auth.getClient()
+const googleAuthReady = auth.getClient()
   .then(() => console.log('✅ GoogleAuth client OK'))
   .catch(err => console.error('❌ GoogleAuth error', err));
+
+async function verifyGoogleSheetsAccess() {
+  await googleAuthReady;
+  await sheets.spreadsheets.get({
+    spreadsheetId: SPREADSHEET_ID,
+    fields: 'spreadsheetId'
+  });
+}
 
 // === TELEGRAM BOT ===
 const bot = new Telegraf(BOT_TOKEN);
@@ -748,7 +839,24 @@ bot.on('document', async (ctx) => {
 // === HTTP SERVER (Render-д зориулсан) ===
 const PORT = process.env.PORT || 3000;
 
-http.createServer((req, res) => {
+http.createServer(async (req, res) => {
+  if (req.url === '/health') {
+    try {
+      await verifyGoogleSheetsAccess();
+      res.writeHead(200, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({ ok: true, status: 'healthy' }));
+    } catch (err) {
+      const message = err?.message || 'Unknown error';
+      res.writeHead(500, { 'Content-Type': 'application/json; charset=utf-8' });
+      res.end(JSON.stringify({
+        ok: false,
+        status: 'unhealthy',
+        error: message
+      }));
+    }
+    return;
+  }
+
   res.writeHead(200, { 'Content-Type': 'text/plain; charset=utf-8' });
   res.end('OYUNS bot is running ✅\n');
 }).listen(PORT, () => {
