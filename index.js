@@ -34,11 +34,35 @@ function normalizePrivateKey(key) {
 
   let normalized = key.trim();
 
-  // Зарим deployment орчинд "\\n" хэлбэрээр хадгалагддаг.
-  normalized = normalized.replace(/\\n/g, '\n').replace(/\r\n/g, '\n');
 
   if (normalized.startsWith('"') && normalized.endsWith('"')) {
     normalized = normalized.slice(1, -1);
+  }
+  if (normalized.startsWith("'") && normalized.endsWith("'")) {
+    normalized = normalized.slice(1, -1);
+  }
+
+  normalized = normalized
+    .replace(/\\r\\n/g, '\n')
+    .replace(/\\n/g, '\n')
+    .replace(/\\r/g, '\n')
+    .replace(/\r\n/g, '\n')
+    .replace(/\r/g, '\n');
+
+  if (!normalized.includes('\n')) {
+  }
+
+  const headerMatch = normalized.match(/-----BEGIN ([^-]+)-----/);
+  const footerMatch = normalized.match(/-----END ([^-]+)-----/);
+  if (headerMatch && footerMatch) {
+    const header = `-----BEGIN ${headerMatch[1]}-----`;
+    const footer = `-----END ${footerMatch[1]}-----`;
+    const body = normalized
+      .replace(/-----BEGIN[^-]+-----/, '')
+      .replace(/-----END[^-]+-----/, '')
+      .replace(/\s+/g, '');
+    const lines = body.match(/.{1,64}/g) || [];
+    normalized = `${header}\n${lines.join('\n')}\n${footer}\n`;
   }
 
   return normalized;
@@ -109,7 +133,11 @@ if (validateServiceAccountCredentials(loadedCredentials)) {
     credentials: loadedCredentials,
     scopes: ['https://www.googleapis.com/auth/spreadsheets']
   };
+  const keyPreview = loadedCredentials.private_key
+    ? loadedCredentials.private_key.split('\n').slice(0, 2).join(' | ')
+    : 'MISSING';
   console.log('Google auth mode: SERVICE_ACCOUNT (env)');
+  console.log('Private key preview (first 2 lines):', keyPreview);
 } else {
   const serviceAccountPath = path.resolve('./service-account.json');
   if (!fs.existsSync(serviceAccountPath)) {
