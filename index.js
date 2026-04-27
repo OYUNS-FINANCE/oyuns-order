@@ -14,7 +14,7 @@ const ALLOWED_CHAT_IDS = [
 
 // === ТОХИРУУЛГА ===
 const BOT_TOKEN = process.env.BOT_TOKEN;
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID || '1qbxJsI4Ns3a8lluxlRZl5r5AKHA3hp9yS7YZLwY469A';
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 const SHEET_NAME = 'Transactions';
 const SWIFT_SHEET_NAME = 'SWIFT';
 
@@ -25,7 +25,7 @@ function requireEnv(name, value) {
 }
 
 requireEnv('BOT_TOKEN', BOT_TOKEN);
-
+requireEnv('SPREADSHEET_ID', SPREADSHEET_ID);
 // === GOOGLE SHEETS AUTH ===
 // Хэрэв SERVICE_ACCOUNT_JSON environment variable байвал тэрийг ашиглана,
 // үгүй бол service-account.json файлаас уншина
