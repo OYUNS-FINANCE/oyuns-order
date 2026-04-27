@@ -134,6 +134,10 @@ const sheetsLock = new SheetsLock();
 
 // === WHITELIST MIDDLEWARE ===
 bot.use(async (ctx, next) => {
+  // /chatid командыг whitelist-с үл хамааран хүн бүрт зөвшөөрнө
+  const msgText = ctx.message?.text || '';
+  if (msgText.startsWith('/chatid')) return next();
+
   const chatId = ctx.chat && ctx.chat.id ? String(ctx.chat.id) : null;
   if (!chatId) return;
 
@@ -364,6 +368,14 @@ async function updateRateForDate(date, rate, numberList = null) {
 // /version команд — шинэчлэгдсэн эсэхийг шалгах
 bot.command('version', (ctx) => {
   ctx.reply('✅ v2.0 — 2026.04.23\nШинэ /start заавар, алдааны дэлгэрэнгүй мэдэгдэл, 👍 reaction засвар.');
+});
+
+// /chatid команд — chat ID харуулах (whitelist-г тохируулахад хэрэгтэй)
+bot.command('chatid', (ctx) => {
+  const id = ctx.chat?.id;
+  const type = ctx.chat?.type;
+  const title = ctx.chat?.title || ctx.chat?.username || '';
+  ctx.reply(`Chat ID: <code>${id}</code>\nТөрөл: ${type}\nНэр: ${title}`, { parse_mode: 'HTML' });
 });
 
 // /start команд
